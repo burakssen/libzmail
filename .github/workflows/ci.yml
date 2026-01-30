@@ -59,15 +59,24 @@ jobs:
       - name: Install Cross dependencies (Linux)
         if: runner.os == 'Linux' && matrix.arch_pkg != ''
         run: |
-          # Enable multi-arch
           sudo dpkg --add-architecture ${{ matrix.arch_pkg }}
           
-          # Update sources to handle ports if necessary (simplistic approach)
-          # Note: riscv64 might require specific ports setup usually not default in GH actions.
-          # We attempt standard update first.
-          sudo apt-get update || true
+          # Configure sources for multi-arch
+          # Ubuntu 24.04 (noble) uses DEB822 format in /etc/apt/sources.list.d/ubuntu.sources
+          if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then
+            sudo sed -i 's/Architectures: /Architectures: amd64 /g' /etc/apt/sources.list.d/ubuntu.sources
+          fi
+          # Also handle old format if it exists
+          if [ -f /etc/apt/sources.list ]; then
+            sudo sed -i 's/^deb /deb [arch=amd64] /g' /etc/apt/sources.list
+          fi
           
-          # Install the package
+          # Add ports repository for the cross architecture
+          echo "deb [arch=${{ matrix.arch_pkg }}] http://ports.ubuntu.com/ubuntu-ports $(lsb_release -cs) main restricted universe multiverse" | sudo tee /etc/apt/sources.list.d/ports.list
+          echo "deb [arch=${{ matrix.arch_pkg }}] http://ports.ubuntu.com/ubuntu-ports $(lsb_release -cs)-updates main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list.d/ports.list
+          echo "deb [arch=${{ matrix.arch_pkg }}] http://ports.ubuntu.com/ubuntu-ports $(lsb_release -cs)-security main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list.d/ports.list
+          
+          sudo apt-get update
           sudo apt-get install -y libcurl4-openssl-dev:${{ matrix.arch_pkg }}
 
       - name: Install dependencies (macOS)
