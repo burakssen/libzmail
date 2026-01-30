@@ -1,5 +1,4 @@
 name: Build Static Libraries
-
 on:
   push:
     branches: [ "main", "master" ]
@@ -25,12 +24,10 @@ jobs:
           - os: ubuntu-latest
             target: riscv64-linux
             zig_target: riscv64-linux-gnu
-          
           # FreeBSD Target (Cross-compile from Linux)
           - os: ubuntu-latest
             target: x86_64-freebsd
             zig_target: x86_64-freebsd
-            
           # MacOS Targets
           - os: macos-latest
             target: x86_64-macos
@@ -38,7 +35,6 @@ jobs:
           - os: macos-latest
             target: aarch64-macos
             zig_target: aarch64-macos
-
           # Windows Target
           - os: windows-latest
             target: x86_64-windows
@@ -47,6 +43,22 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Install libcurl (Ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcurl4-openssl-dev
+
+      - name: Install libcurl (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install curl
+
+      - name: Install libcurl (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          choco install curl
 
       - name: Cache Zig global cache
         uses: actions/cache@v4
@@ -92,7 +104,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
