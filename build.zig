@@ -46,19 +46,12 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    // This will be removed later for convenience purposes
-    {
-        const libzmail_exe = b.addExecutable(.{
-            .name = "libzmail",
-            .root_module = libzmail_mod,
-        });
+    const libzmail_lib = b.addLibrary(.{
+        .name = "zmail",
+        .root_module = libzmail_mod,
+    });
 
-        b.installArtifact(libzmail_exe);
-
-        const run_step = b.step("run", "Run executable");
-        const run_cmd = b.addRunArtifact(libzmail_exe);
-        run_step.dependOn(&run_cmd.step);
-    }
+    b.installArtifact(libzmail_lib);
 
     const test_step = b.step("test", "Run tests");
 

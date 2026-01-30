@@ -1,0 +1,140 @@
+name: Build Static Libraries
+
+on:
+  push:
+    branches: [ "main", "master" ]
+    tags: [ "v*" ]
+  pull_request:
+    branches: [ "main", "master" ]
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux Targets
+          - os: ubuntu-latest
+            target: x86_64-linux
+            zig_target: x86_64-linux-gnu
+          - os: ubuntu-latest
+            target: aarch64-linux
+            zig_target: aarch64-linux-gnu
+            arch_pkg: arm64
+          - os: ubuntu-latest
+            target: riscv64-linux
+            zig_target: riscv64-linux-gnu
+            arch_pkg: riscv64
+          
+          # FreeBSD Target (Cross from Linux)
+          - os: ubuntu-latest
+            target: x86_64-freebsd
+            zig_target: x86_64-freebsd
+            
+          # MacOS Targets
+          - os: macos-latest
+            target: x86_64-macos
+            zig_target: x86_64-macos
+          - os: macos-latest
+            target: aarch64-macos
+            zig_target: aarch64-macos
+
+          # Windows Target
+          - os: windows-latest
+            target: x86_64-windows
+            zig_target: x86_64-windows-gnu
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux' && matrix.arch_pkg == ''
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcurl4-openssl-dev
+
+      - name: Install Cross dependencies (Linux)
+        if: runner.os == 'Linux' && matrix.arch_pkg != ''
+        run: |
+          # Enable multi-arch
+          sudo dpkg --add-architecture ${{ matrix.arch_pkg }}
+          
+          # Update sources to handle ports if necessary (simplistic approach)
+          # Note: riscv64 might require specific ports setup usually not default in GH actions.
+          # We attempt standard update first.
+          sudo apt-get update || true
+          
+          # Install the package
+          sudo apt-get install -y libcurl4-openssl-dev:${{ matrix.arch_pkg }}
+
+      - name: Install dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install curl
+
+      - name: Install dependencies (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # Use vcpkg to install curl. GitHub Actions runners have vcpkg installed.
+          vcpkg install curl
+          # Set environment variables for Zig to find the headers
+          echo "CPATH=${env:VCPKG_INSTALLATION_ROOT}\installed\x64-windows\include" >> $env:GITHUB_ENV
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v1
+        with:
+          version: 0.15.2
+
+      - name: Build
+        run: zig build -Dtarget=${{ matrix.zig_target }} --summary all
+
+      - name: Rename and Prepare Artifact (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          mv zig-out/lib/libzmail.a libzmail-${{ matrix.target }}.a
+
+      - name: Rename and Prepare Artifact (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          mv zig-out/lib/zmail.lib libzmail-${{ matrix.target }}.lib
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: libzmail-${{ matrix.target }}
+          path: libzmail-${{ matrix.target }}.*
+
+  release:
+    name: Create Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+
+      - name: Display structure of downloaded files
+        run: ls -R
+
+      - name: Move artifacts to root
+        run: |
+          mkdir release_assets
+          find . -name "libzmail-*.a" -exec mv {} release_assets/ \;
+          find . -name "libzmail-*.lib" -exec mv {} release_assets/ \;
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: release_assets/*
+          generate_release_notes: true
