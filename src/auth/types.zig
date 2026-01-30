@@ -20,9 +20,22 @@ const ClientOptions = struct {
         .token_endpoint = "https://oauth2.googleapis.com/token",
         .userinfo_endpoint = "https://www.googleapis.com/oauth2/v2/userinfo",
         .redirect_uri = "http://127.0.0.1:8080",
-        .scopes = &[_][]const u8{
+        .scopes = &.{
             "https://mail.google.com/",
             "https://www.googleapis.com/auth/userinfo.email",
+        },
+    };
+
+    pub const microsoft = ClientOptions{
+        .auth_endpoint = "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
+        .token_endpoint = "https://login.microsoftonline.com/common/oauth2/v2.0/token",
+        .userinfo_endpoint = "https://graph.microsoft.com/oidc/userinfo",
+        .redirect_uri = "http://127.0.0.1:8080",
+        .scopes = &.{
+            "https://outlook.office.com/SMTP.Send",
+            "offline_access",
+            "openid",
+            "email",
         },
     };
 };

@@ -1,16 +1,16 @@
 const std = @import("std");
-const log = std.log.scoped(.oauth2_provider);
+const log = std.log.scoped(.oauth2);
 
 const c = @cImport(@cInclude("curl/curl.h"));
-
 const types = @import("../types.zig");
 
 const OAuth2Provider = @This();
 
+const response_page = @embedFile("index.html");
+
 allocator: std.mem.Allocator,
 payload: types.OAuth2Payload,
 access_token: ?[]const u8 = null,
-code_verifier: ?[]const u8 = null,
 username: ?[]const u8 = null,
 
 pub fn init(allocator: std.mem.Allocator, payload: types.OAuth2Payload) OAuth2Provider {
@@ -21,431 +21,353 @@ pub fn init(allocator: std.mem.Allocator, payload: types.OAuth2Payload) OAuth2Pr
 }
 
 pub fn deinit(self: *OAuth2Provider) void {
-    if (self.access_token) |token| {
-        self.allocator.free(token);
-    }
-    if (self.code_verifier) |verifier| {
-        self.allocator.free(verifier);
-    }
-    if (self.username) |user| {
-        self.allocator.free(user);
-    }
+    if (self.access_token) |t| self.allocator.free(t);
+    if (self.username) |u| self.allocator.free(u);
 }
 
 pub fn authenticate(self: *OAuth2Provider, curl: *c.CURL) !void {
-    // If we already have a token, use it
     if (self.access_token) |token| {
-        try self.setAuthHeader(curl, token);
-        return;
+        return self.setAuthHeader(curl, token);
     }
 
-    // Otherwise, perform OAuth2 flow
-    try self.performOAuth2Flow(curl);
+    try self.performFlow(curl);
+
+    if (self.access_token) |token| {
+        try self.setAuthHeader(curl, token);
+    } else {
+        return error.AuthenticationFailed;
+    }
 }
 
-fn performOAuth2Flow(self: *OAuth2Provider, curl: *c.CURL) !void {
-    // Generate PKCE values
-    const code_verifier = try self.generateCodeVerifier();
-    errdefer self.allocator.free(code_verifier);
+fn performFlow(self: *OAuth2Provider, curl: *c.CURL) !void {
+    // 1. Setup PKCE
+    const code_verifier = try self.generateRandomString(64);
+    defer self.allocator.free(code_verifier);
 
     const code_challenge = try self.generateCodeChallenge(code_verifier);
     defer self.allocator.free(code_challenge);
 
-    // Build authorization URL
+    // 2. Authorization Step
     const auth_url = try self.buildAuthorizationUrl(code_challenge);
     defer self.allocator.free(auth_url);
 
-    // Prompt user to visit the URL
-    log.info("Opening authorization URL in your browser...", .{});
-    log.info("{s}", .{auth_url});
-
-    // Open the URL in the default browser
+    log.info("Opening authorization URL: {s}", .{auth_url});
     try self.openBrowser(auth_url);
 
-    // Start local server and wait for code
-    log.info("Waiting for callback on {s}...", .{self.payload.client_options.redirect_uri});
-    const auth_code_owned = try self.listenForCallback();
-    defer self.allocator.free(auth_code_owned);
-    const auth_code = auth_code_owned;
+    const auth_code = try self.listenForCallback();
+    defer self.allocator.free(auth_code);
 
-    // Exchange authorization code for access token
-    const access_token = try self.exchangeCodeForToken(curl, auth_code, code_verifier);
+    // 3. Token Exchange Step
+    const tokens = try self.exchangeCodeForToken(curl, auth_code, code_verifier);
+    defer {
+        if (tokens.id_token) |t| self.allocator.free(t);
+        self.allocator.free(tokens.access_token);
+    }
 
-    // Store the verifier and token
-    self.code_verifier = code_verifier;
-    self.access_token = access_token;
+    self.access_token = try self.allocator.dupe(u8, tokens.access_token);
 
-    // Fetch user info to get the email
-    const username = try self.fetchUserInfo(curl, access_token);
-    self.username = username;
-    log.info("Authenticated as: {s}", .{username});
+    // 4. User Info Step
+    if (tokens.id_token) |idt| {
+        if (try self.extractEmailFromIdToken(idt)) |email| {
+            self.username = email;
+        }
+    }
 
-    // Set the authorization header
-    try self.setAuthHeader(curl, access_token);
+    if (self.username == null) {
+        log.info("Fetching user info from endpoint...", .{});
+        self.username = try self.fetchUserInfo(curl, self.access_token.?);
+    }
 
-    log.info("OAuth2 authentication configured successfully", .{});
+    log.info("Authenticated as: {s}", .{self.username.?});
 }
 
-fn fetchUserInfo(self: *OAuth2Provider, curl: *c.CURL, access_token: []const u8) ![]const u8 {
-    _ = c.curl_easy_reset(curl);
+fn setAuthHeader(self: *OAuth2Provider, curl: *c.CURL, token: []const u8) !void {
+    var res = c.curl_easy_setopt(curl, c.CURLOPT_XOAUTH2_BEARER, token.ptr);
+    if (res != c.CURLE_OK) return error.CurlSetoptFailed;
 
-    const res1 = c.curl_easy_setopt(curl, c.CURLOPT_URL, self.payload.client_options.userinfo_endpoint.ptr);
-    if (res1 != c.CURLE_OK) return error.CurlSetoptFailed;
+    if (self.username) |u| {
+        res = c.curl_easy_setopt(curl, c.CURLOPT_USERNAME, u.ptr);
+        if (res != c.CURLE_OK) return error.CurlSetoptFailed;
+    }
 
-    const auth_header = try std.fmt.allocPrint(self.allocator, "Authorization: Bearer {s}", .{access_token});
+    res = c.curl_easy_setopt(curl, c.CURLOPT_LOGIN_OPTIONS, "AUTH=XOAUTH2");
+    if (res != c.CURLE_OK) return error.CurlSetoptFailed;
+}
+
+// --- OAuth2 Helpers ---
+
+fn buildAuthorizationUrl(self: *OAuth2Provider, challenge: []const u8) ![]const u8 {
+    var query: std.Io.Writer.Allocating = .init(self.allocator);
+    defer query.deinit();
+
+    const writer = &query.writer;
+    try writer.print("{s}?response_type=code&client_id={s}&code_challenge={s}&code_challenge_method=S256", .{
+        self.payload.client_options.auth_endpoint,
+        self.payload.client_id,
+        challenge,
+    });
+
+    try writer.writeAll("&redirect_uri=");
+    try self.percentEncodeWriter(writer, self.payload.client_options.redirect_uri);
+
+    if (self.payload.client_options.scopes) |scopes| {
+        if (scopes.len > 0) {
+            try writer.writeAll("&scope=");
+            for (scopes, 0..) |scope, i| {
+                if (i > 0) try writer.writeAll("%20");
+                try self.percentEncodeWriter(writer, scope);
+            }
+        }
+    }
+
+    return query.toOwnedSlice();
+}
+
+const TokenResult = struct {
+    access_token: []const u8,
+    id_token: ?[]const u8,
+};
+
+fn exchangeCodeForToken(self: *OAuth2Provider, curl: *c.CURL, code: []const u8, verifier: []const u8) !TokenResult {
+    var form: std.Io.Writer.Allocating = .init(self.allocator);
+    defer form.deinit();
+
+    const writer = &form.writer;
+    try writer.writeAll("grant_type=authorization_code&code=");
+    try self.percentEncodeWriter(writer, code);
+    try writer.writeAll("&redirect_uri=");
+    try self.percentEncodeWriter(writer, self.payload.client_options.redirect_uri);
+    try writer.writeAll("&client_id=");
+    try self.percentEncodeWriter(writer, self.payload.client_id);
+    try writer.print("&code_verifier={s}", .{verifier});
+
+    const body = try self.performRequest(curl, self.payload.client_options.token_endpoint, form.written(), null);
+    defer self.allocator.free(body);
+
+    const Resp = struct {
+        access_token: []const u8,
+        id_token: ?[]const u8 = null,
+        @"error": ?[]const u8 = null,
+        error_description: ?[]const u8 = null,
+    };
+
+    const parsed = try std.json.parseFromSlice(Resp, self.allocator, body, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+
+    if (parsed.value.@"error") |err| {
+        log.err("OAuth2 Error: {s} ({?s})", .{ err, parsed.value.error_description });
+        return error.OAuth2Error;
+    }
+
+    return .{
+        .access_token = try self.allocator.dupe(u8, parsed.value.access_token),
+        .id_token = if (parsed.value.id_token) |t| try self.allocator.dupe(u8, t) else null,
+    };
+}
+
+fn fetchUserInfo(self: *OAuth2Provider, curl: *c.CURL, token: []const u8) ![]const u8 {
+    const auth_header = try std.fmt.allocPrint(self.allocator, "Authorization: Bearer {s}", .{token});
     defer self.allocator.free(auth_header);
 
+    const body = try self.performRequest(curl, self.payload.client_options.userinfo_endpoint, null, auth_header);
+    defer self.allocator.free(body);
+
+    const User = struct { email: []const u8 };
+    const parsed = try std.json.parseFromSlice(User, self.allocator, body, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+
+    return self.allocator.dupe(u8, parsed.value.email);
+}
+
+// --- Utils ---
+
+fn performRequest(self: *OAuth2Provider, curl: *c.CURL, url: []const u8, post_data: ?[]const u8, header: ?[]const u8) ![]const u8 {
+    _ = c.curl_easy_reset(curl);
+
+    var res = c.curl_easy_setopt(curl, c.CURLOPT_URL, url.ptr);
+    if (res != c.CURLE_OK) return error.CurlSetoptFailed;
+
+    if (post_data) |data| {
+        res = c.curl_easy_setopt(curl, c.CURLOPT_POSTFIELDS, data.ptr);
+        res = c.curl_easy_setopt(curl, c.CURLOPT_POSTFIELDSIZE, @as(c_long, @intCast(data.len)));
+    }
+
     var headers: ?*c.struct_curl_slist = null;
-    headers = c.curl_slist_append(headers, auth_header.ptr);
-    defer c.curl_slist_free_all(headers);
+    defer if (headers != null) c.curl_slist_free_all(headers);
 
-    const res2 = c.curl_easy_setopt(curl, c.CURLOPT_HTTPHEADER, headers);
-    if (res2 != c.CURLE_OK) return error.CurlSetoptFailed;
+    if (header) |h| {
+        headers = c.curl_slist_append(headers, h.ptr);
+        res = c.curl_easy_setopt(curl, c.CURLOPT_HTTPHEADER, headers);
+    }
 
-    var response: std.Io.Writer.Allocating = .init(self.allocator);
-    errdefer response.deinit();
+    var resp_buf: std.Io.Writer.Allocating = .init(self.allocator);
+    defer resp_buf.deinit();
 
-    const res3 = c.curl_easy_setopt(curl, c.CURLOPT_WRITEFUNCTION, writeCallback);
-    if (res3 != c.CURLE_OK) return error.CurlSetoptFailed;
+    const response_writer = &resp_buf.writer;
 
-    const res4 = c.curl_easy_setopt(curl, c.CURLOPT_WRITEDATA, &response);
-    if (res4 != c.CURLE_OK) return error.CurlSetoptFailed;
+    res = c.curl_easy_setopt(curl, c.CURLOPT_WRITEFUNCTION, writeCallback);
+    res = c.curl_easy_setopt(curl, c.CURLOPT_WRITEDATA, response_writer);
 
-    const res5 = c.curl_easy_perform(curl);
-    if (res5 != c.CURLE_OK) {
-        log.err("Failed to fetch user info: {s}", .{c.curl_easy_strerror(res5)});
+    res = c.curl_easy_perform(curl);
+    if (res != c.CURLE_OK) {
+        log.err("Request failed: {s}", .{c.curl_easy_strerror(res)});
         return error.CurlPerformFailed;
     }
 
-    const response_json = try response.toOwnedSlice();
-    defer self.allocator.free(response_json);
+    return resp_buf.toOwnedSlice();
+}
 
-    const UserInfo = struct {
-        email: []const u8,
-    };
+fn writeCallback(ptr: *anyopaque, size: c_uint, nmemb: c_uint, userdata: *anyopaque) callconv(.c) c_uint {
+    const real_size = size * nmemb;
+    const buffer: [*]const u8 = @ptrCast(ptr);
+    const list: *std.Io.Writer = @ptrCast(@alignCast(userdata));
+    list.writeAll(buffer[0..real_size]) catch return 0;
+    return real_size;
+}
 
-    const parsed = try std.json.parseFromSlice(
-        UserInfo,
-        self.allocator,
-        response_json,
-        .{ .ignore_unknown_fields = true },
-    );
+fn listenForCallback(self: *OAuth2Provider) ![]const u8 {
+    const uri = try std.Uri.parse(self.payload.client_options.redirect_uri);
+    const port = uri.port orelse return error.MissingPortInRedirectURI;
+
+    const addr = try std.net.Address.parseIp("127.0.0.1", port);
+    var server = try addr.listen(.{ .reuse_address = true });
+    defer server.deinit();
+
+    const conn = try server.accept();
+    defer conn.stream.close();
+
+    var buf: [4096]u8 = undefined;
+    const len = try conn.stream.read(&buf);
+    const req = buf[0..len];
+
+    // Simple parser for "code=..."
+    // We look for "code=" followed by chars until space or &
+    const marker = "code=";
+    if (std.mem.indexOf(u8, req, marker)) |idx| {
+        const start = idx + marker.len;
+        var end = start;
+        while (end < req.len) : (end += 1) {
+            const char = req[end];
+            if (char == ' ' or char == '&' or char == '\r' or char == '\n') break;
+        }
+
+        const raw_code = req[start..end];
+
+        const resp = std.fmt.allocPrint(self.allocator, "HTTP/1.1 200 OK\r\n" ++
+            "Content-Type: text/html; charset=utf-8\r\n" ++
+            "Content-Length: {d}\r\n" ++
+            "Connection: close\r\n" ++
+            "\r\n" ++
+            "{s}", .{ response_page.len, response_page }) catch unreachable;
+        defer self.allocator.free(resp);
+
+        _ = try conn.stream.writeAll(resp);
+
+        return self.percentDecode(raw_code);
+    }
+    return error.CodeNotFound;
+}
+
+fn generateCodeChallenge(self: *OAuth2Provider, verifier: []const u8) ![]const u8 {
+    var hash: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(verifier, &hash, .{});
+
+    const encoder = std.base64.url_safe_no_pad.Encoder;
+    const len = encoder.calcSize(hash.len);
+    const out = try self.allocator.alloc(u8, len);
+    _ = encoder.encode(out, &hash);
+    return out;
+}
+
+fn generateRandomString(self: *OAuth2Provider, len: usize) ![]const u8 {
+    const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~";
+    const out = try self.allocator.alloc(u8, len);
+
+    // Use crypto secure random
+    var seed: [8]u8 = undefined;
+    try std.posix.getrandom(&seed);
+    var prng = std.Random.DefaultPrng.init(std.mem.readInt(u64, &seed, .little));
+    const random = prng.random();
+
+    for (out) |*c_ptr| {
+        c_ptr.* = chars[random.intRangeAtMost(usize, 0, chars.len - 1)];
+    }
+    return out;
+}
+
+fn extractEmailFromIdToken(self: *OAuth2Provider, id_token: []const u8) !?[]const u8 {
+    var it = std.mem.splitScalar(u8, id_token, '.');
+    _ = it.next(); // header
+    const payload_b64 = it.next() orelse return null;
+
+    // Use a decoder that ignores padding if needed
+    const decoder = std.base64.url_safe_no_pad.Decoder;
+    const decoded_len = try decoder.calcSizeForSlice(payload_b64);
+
+    const payload_json = try self.allocator.alloc(u8, decoded_len);
+    defer self.allocator.free(payload_json);
+    try decoder.decode(payload_json, payload_b64);
+
+    const Payload = struct { email: ?[]const u8 = null, preferred_username: ?[]const u8 = null };
+    const parsed = try std.json.parseFromSlice(Payload, self.allocator, payload_json, .{ .ignore_unknown_fields = true });
     defer parsed.deinit();
 
-    return try self.allocator.dupe(u8, parsed.value.email);
+    if (parsed.value.email) |e| return try self.allocator.dupe(u8, e);
+    if (parsed.value.preferred_username) |u| return try self.allocator.dupe(u8, u);
+    return null;
 }
 
 fn openBrowser(self: *OAuth2Provider, url: []const u8) !void {
-    const builtin = @import("builtin");
-
-    var argv: []const []const u8 = undefined;
-
-    switch (builtin.os.tag) {
-        .macos => {
-            argv = &[_][]const u8{ "open", url };
-        },
-        .linux => {
-            argv = &[_][]const u8{ "xdg-open", url };
-        },
-        .windows => {
-            argv = &[_][]const u8{ "cmd", "/c", "start", url };
-        },
-        else => {
-            log.warn("Unsupported platform for automatic browser opening. Please manually visit the URL above.", .{});
-            return;
-        },
-    }
+    const argv: []const []const u8 = switch (@import("builtin").os.tag) {
+        .macos => &.{ "open", url },
+        .windows => &.{ "cmd", "/c", "start", url },
+        else => &.{ "xdg-open", url },
+    };
 
     var child = std.process.Child.init(argv, self.allocator);
     child.stdin_behavior = .Ignore;
     child.stdout_behavior = .Ignore;
     child.stderr_behavior = .Ignore;
-
     _ = child.spawn() catch |err| {
-        log.warn("Failed to open browser automatically: {any}. Please manually visit the URL above.", .{err});
-        return;
+        log.warn("Failed to open browser: {any}", .{err});
     };
-
-    // We don't wait for the process to complete since browsers may detach
 }
 
-fn listenForCallback(self: *OAuth2Provider) ![]const u8 {
-    const uri = try std.Uri.parse(self.payload.client_options.redirect_uri);
-    const port = uri.port orelse return error.PortNotFoundInRedirectUri;
-
-    // Listen on 127.0.0.1
-    const address = try std.net.Address.parseIp("127.0.0.1", port);
-    var server = try address.listen(.{
-        .kernel_backlog = 1,
-        .reuse_address = true,
-    });
-    defer server.deinit();
-
-    // Accept one connection
-    const connection = try server.accept();
-    defer connection.stream.close();
-
-    var buf: [4096]u8 = undefined;
-    const len = try connection.stream.read(&buf);
-    const request = buf[0..len];
-
-    // Find "code="
-    const code_marker = "code=";
-    const start_idx = std.mem.indexOf(u8, request, code_marker);
-
-    if (start_idx) |idx| {
-        const code_start = idx + code_marker.len;
-        var code_end = code_start;
-        while (code_end < request.len) : (code_end += 1) {
-            const char = request[code_end];
-            if (char == '&' or char == ' ' or char == '\r' or char == '\n') break;
-        }
-
-        const code = request[code_start..code_end];
-
-        // Respond
-        const response_body =
-            \\<!DOCTYPE html>
-            \\<html>
-            \\<body style="font-family: sans-serif; text-align: center; padding-top: 50px;">
-            \\<h1>Authorization Successful</h1>
-            \\<p>You can verify the authentication in your terminal and close this window.</p>
-            \\<script>window.close()</script>
-            \\</body>
-            \\</html>
-        ;
-
-        const response_header = try std.fmt.allocPrint(self.allocator, "HTTP/1.1 200 OK\r\n" ++
-            "Content-Type: text/html\r\n" ++
-            "Content-Length: {d}\r\n" ++
-            "Connection: close\r\n" ++
-            "\r\n", .{response_body.len});
-        defer self.allocator.free(response_header);
-
-        _ = try connection.stream.writeAll(response_header);
-        _ = try connection.stream.writeAll(response_body);
-
-        return try self.allocator.dupe(u8, code);
-    } else {
-        return error.CodeNotFoundInRequest;
-    }
-}
-
-fn generateCodeVerifier(self: *OAuth2Provider) ![]const u8 {
-    // Generate 43-128 character random string (we'll use 64 characters)
-    const verifier_len = 64;
-    const verifier = try self.allocator.alloc(u8, verifier_len);
-    errdefer self.allocator.free(verifier);
-
-    var prng = std.Random.DefaultPrng.init(blk: {
-        var seed: u64 = undefined;
-        try std.posix.getrandom(std.mem.asBytes(&seed));
-        break :blk seed;
-    });
-    const rand = prng.random();
-
-    const charset = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~";
-    for (verifier) |*byte| {
-        byte.* = charset[rand.intRangeAtMost(usize, 0, charset.len - 1)];
-    }
-
-    return verifier;
-}
-
-fn generateCodeChallenge(self: *OAuth2Provider, verifier: []const u8) ![]const u8 {
-    // SHA256 hash the verifier
-    var hash: [32]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(verifier, &hash, .{});
-
-    // Base64url encode (without padding)
-    const encoder = std.base64.url_safe_no_pad.Encoder;
-    const encoded_len = encoder.calcSize(hash.len);
-    const challenge = try self.allocator.alloc(u8, encoded_len);
-    _ = encoder.encode(challenge, &hash);
-
-    return challenge;
-}
-
-fn urlEncode(self: *OAuth2Provider, input: []const u8) ![]const u8 {
-    var result: std.Io.Writer.Allocating = .init(self.allocator);
-    errdefer result.deinit();
-
-    var writer = &result.writer;
-
+fn percentEncodeWriter(self: *OAuth2Provider, w: anytype, input: []const u8) !void {
+    _ = self;
     for (input) |byte| {
         if (std.ascii.isAlphanumeric(byte) or byte == '-' or byte == '_' or byte == '.' or byte == '~') {
-            try writer.writeByte(byte);
+            try w.writeByte(byte);
         } else {
-            try writer.print("%{X:0>2}", .{byte});
+            try w.print("%{X:0>2}", .{byte});
         }
     }
-
-    return result.toOwnedSlice();
 }
 
-fn buildAuthorizationUrl(self: *OAuth2Provider, code_challenge: []const u8) ![]const u8 {
-    // URL encode the redirect_uri
-    const encoded_redirect = try self.urlEncode(self.payload.client_options.redirect_uri);
-    defer self.allocator.free(encoded_redirect);
+fn percentDecode(self: *OAuth2Provider, input: []const u8) ![]const u8 {
+    var out: std.Io.Writer.Allocating = try .initCapacity(self.allocator, input.len);
+    defer out.deinit();
 
-    var url: std.Io.Writer.Allocating = .init(self.allocator);
-    errdefer url.deinit();
+    const writer = &out.writer;
 
-    const writer = &url.writer;
-    try writer.print("{s}?response_type=code&client_id={s}&redirect_uri={s}&code_challenge={s}&code_challenge_method=S256", .{
-        self.payload.client_options.auth_endpoint,
-        self.payload.client_id,
-        encoded_redirect,
-        code_challenge,
-    });
-
-    // Add scope if provided
-    if (self.payload.client_options.scopes) |scope| {
-        if (scope.len > 0) {
-            try writer.writeAll("&scope=");
-            for (scope, 0..) |_scope, i| {
-                if (i > 0) try writer.writeAll("%20");
-                const encoded_scope = try self.urlEncode(_scope);
-                defer self.allocator.free(encoded_scope);
-                try writer.writeAll(encoded_scope);
+    var i: usize = 0;
+    while (i < input.len) {
+        if (input[i] == '%' and i + 2 < input.len) {
+            const hex = input[i + 1 .. i + 3];
+            if (std.fmt.parseInt(u8, hex, 16)) |b| {
+                try writer.writeByte(b);
+                i += 3;
+            } else |_| {
+                try writer.writeByte(input[i]);
+                i += 1;
             }
+        } else if (input[i] == '+') {
+            try writer.writeByte(' ');
+            i += 1;
+        } else {
+            try writer.writeByte(input[i]);
+            i += 1;
         }
     }
-
-    return url.toOwnedSlice();
-}
-
-fn exchangeCodeForToken(self: *OAuth2Provider, curl: *c.CURL, auth_code: []const u8, code_verifier: []const u8) ![]const u8 {
-    // Build POST data - URL encode parameters (except code_verifier which is already URL-safe)
-    const encoded_code = try self.urlEncode(auth_code);
-    defer self.allocator.free(encoded_code);
-
-    const encoded_redirect = try self.urlEncode(self.payload.client_options.redirect_uri);
-    defer self.allocator.free(encoded_redirect);
-
-    const encoded_client_id = try self.urlEncode(self.payload.client_id);
-    defer self.allocator.free(encoded_client_id);
-
-    // Note: code_verifier should NOT be URL-encoded as per PKCE spec
-    // It only contains URL-safe characters (A-Z, a-z, 0-9, -, ., _, ~)
-
-    var post_data: std.Io.Writer.Allocating = .init(self.allocator);
-    defer post_data.deinit();
-
-    const writer = &post_data.writer;
-    try writer.print("grant_type=authorization_code&code={s}&redirect_uri={s}&client_id={s}&code_verifier={s}", .{
-        encoded_code,
-        encoded_redirect,
-        encoded_client_id,
-        code_verifier, // Use raw code_verifier, not encoded
-    });
-
-    // Set up curl for token exchange
-    const res1 = c.curl_easy_setopt(curl, c.CURLOPT_URL, self.payload.client_options.token_endpoint.ptr);
-    if (res1 != c.CURLE_OK) {
-        log.err("Failed to set token endpoint URL: {s}", .{c.curl_easy_strerror(res1)});
-        return error.CurlSetoptFailed;
-    }
-
-    const post_data_slice = post_data.written();
-    const res2 = c.curl_easy_setopt(curl, c.CURLOPT_POSTFIELDS, post_data_slice.ptr);
-    if (res2 != c.CURLE_OK) {
-        log.err("Failed to set POST data: {s}", .{c.curl_easy_strerror(res2)});
-        return error.CurlSetoptFailed;
-    }
-
-    const res2_size = c.curl_easy_setopt(curl, c.CURLOPT_POSTFIELDSIZE, @as(c_long, @intCast(post_data_slice.len)));
-    if (res2_size != c.CURLE_OK) {
-        log.err("Failed to set POST data size: {s}", .{c.curl_easy_strerror(res2_size)});
-        return error.CurlSetoptFailed;
-    }
-
-    // Capture response
-    var response: std.Io.Writer.Allocating = .init(self.allocator);
-    errdefer response.deinit();
-
-    const res3 = c.curl_easy_setopt(curl, c.CURLOPT_WRITEFUNCTION, writeCallback);
-    if (res3 != c.CURLE_OK) {
-        log.err("Failed to set write callback: {s}", .{c.curl_easy_strerror(res3)});
-        return error.CurlSetoptFailed;
-    }
-
-    const res4 = c.curl_easy_setopt(curl, c.CURLOPT_WRITEDATA, &response);
-    if (res4 != c.CURLE_OK) {
-        log.err("Failed to set write data: {s}", .{c.curl_easy_strerror(res4)});
-        return error.CurlSetoptFailed;
-    }
-
-    // Perform request
-    const res5 = c.curl_easy_perform(curl);
-    if (res5 != c.CURLE_OK) {
-        log.err("Failed to perform token exchange: {s}", .{c.curl_easy_strerror(res5)});
-        return error.CurlPerformFailed;
-    }
-
-    // Parse JSON response to extract access_token
-    const response_json = try response.toOwnedSlice();
-    defer self.allocator.free(response_json);
-
-    log.debug("Token response: {s}\n", .{response_json});
-
-    const TokenResponse = struct {
-        access_token: ?[]const u8 = null,
-        @"error": ?[]const u8 = null,
-        error_description: ?[]const u8 = null,
-    };
-
-    const parsed = try std.json.parseFromSlice(
-        TokenResponse,
-        self.allocator,
-        response_json,
-        .{
-            .ignore_unknown_fields = true,
-        },
-    );
-    defer parsed.deinit();
-
-    if (parsed.value.access_token) |token| {
-        return try self.allocator.dupe(u8, token);
-    } else if (parsed.value.@"error") |err_msg| {
-        log.err("OAuth2 error: {s} - {s}", .{ err_msg, parsed.value.error_description orelse "Unknown error" });
-        return error.OAuth2Error;
-    } else {
-        return error.MissingAccessToken;
-    }
-}
-
-fn setAuthHeader(self: *OAuth2Provider, curl: *c.CURL, token: []const u8) !void {
-    // For both HTTP and SMTP, CURLOPT_XOAUTH2_BEARER is the correct way to pass the token
-    // when using libcurl's SASL/OAuth2 support.
-    var res = c.curl_easy_setopt(curl, c.CURLOPT_XOAUTH2_BEARER, token.ptr);
-    if (res != c.CURLE_OK) {
-        log.err("Failed to set XOAUTH2 bearer token: {s}", .{c.curl_easy_strerror(res)});
-        return error.CurlSetoptFailed;
-    }
-
-    if (self.username) |username| {
-        res = c.curl_easy_setopt(curl, c.CURLOPT_USERNAME, username.ptr);
-        if (res != c.CURLE_OK) {
-            log.err("Failed to set username: {s}", .{c.curl_easy_strerror(res)});
-            return error.CurlSetoptFailed;
-        }
-    }
-
-    // Force SASL XOAUTH2
-    res = c.curl_easy_setopt(curl, c.CURLOPT_LOGIN_OPTIONS, "AUTH=XOAUTH2");
-    if (res != c.CURLE_OK) {
-        log.err("Failed to set login options: {s}", .{c.curl_easy_strerror(res)});
-        return error.CurlSetoptFailed;
-    }
-}
-
-fn writeCallback(ptr: *anyopaque, size: c_uint, nmemb: c_uint, userdata: *anyopaque) callconv(.c) c_uint {
-    const actual_size = size * nmemb;
-    const buffer: [*]const u8 = @ptrCast(ptr);
-    const response: *std.Io.Writer.Allocating = @ptrCast(@alignCast(userdata));
-
-    var response_writer = &response.writer;
-    response_writer.writeAll(buffer[0..actual_size]) catch return 0;
-    return actual_size;
+    return out.toOwnedSlice();
 }
