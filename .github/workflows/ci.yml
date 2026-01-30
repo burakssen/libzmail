@@ -48,17 +48,26 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libcurl4-openssl-dev
+          sudo apt-get install -y libcurl4-openssl-dev pkg-config
 
       - name: Install libcurl (macOS)
         if: runner.os == 'macOS'
         run: |
-          brew install curl
+          brew install curl pkg-config
 
       - name: Install libcurl (Windows)
         if: runner.os == 'Windows'
+        shell: pwsh
         run: |
-          choco install curl
+          # Install curl using chocolatey
+          choco install curl -y
+          
+          # Also install MSYS2 which provides proper development libraries
+          choco install msys2 -y
+          
+          # Update MSYS2 and install curl-devel
+          C:\tools\msys64\usr\bin\bash.exe -lc "pacman -Syu --noconfirm"
+          C:\tools\msys64\usr\bin\bash.exe -lc "pacman -S --noconfirm mingw-w64-x86_64-curl"
 
       - name: Cache Zig global cache
         uses: actions/cache@v4
@@ -72,6 +81,42 @@ jobs:
         uses: goto-bus-stop/setup-zig@v2
         with:
           version: 0.15.2
+
+      - name: Set library paths (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          echo "LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:$LIBRARY_PATH" >> $GITHUB_ENV
+          echo "CPATH=/usr/include:$CPATH" >> $GITHUB_ENV
+          echo "PKG_CONFIG_PATH=/usr/lib/x86_64-linux-gnu/pkgconfig:$PKG_CONFIG_PATH" >> $GITHUB_ENV
+
+      - name: Set library paths (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          # Homebrew paths for ARM (Apple Silicon)
+          if [ -d "/opt/homebrew" ]; then
+            echo "LIBRARY_PATH=/opt/homebrew/lib:$LIBRARY_PATH" >> $GITHUB_ENV
+            echo "CPATH=/opt/homebrew/include:$CPATH" >> $GITHUB_ENV
+            echo "PKG_CONFIG_PATH=/opt/homebrew/lib/pkgconfig:$PKG_CONFIG_PATH" >> $GITHUB_ENV
+          fi
+          
+          # Homebrew paths for Intel
+          if [ -d "/usr/local" ]; then
+            echo "LIBRARY_PATH=/usr/local/lib:$LIBRARY_PATH" >> $GITHUB_ENV
+            echo "CPATH=/usr/local/include:$CPATH" >> $GITHUB_ENV
+            echo "PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:$PKG_CONFIG_PATH" >> $GITHUB_ENV
+          fi
+
+      - name: Set library paths (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # Add MSYS2 MinGW paths
+          echo "LIBRARY_PATH=C:\tools\msys64\mingw64\lib;$env:LIBRARY_PATH" | Out-File -FilePath $env:GITHUB_ENV -Append
+          echo "CPATH=C:\tools\msys64\mingw64\include;$env:CPATH" | Out-File -FilePath $env:GITHUB_ENV -Append
+          echo "PKG_CONFIG_PATH=C:\tools\msys64\mingw64\lib\pkgconfig;$env:PKG_CONFIG_PATH" | Out-File -FilePath $env:GITHUB_ENV -Append
+          
+          # Add to PATH
+          echo "C:\tools\msys64\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
 
       - name: Build static library
         run: |
