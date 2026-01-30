@@ -2,7 +2,6 @@
 
 ![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
 ![Zig Version](https://img.shields.io/badge/Zig-0.15.2+-orange.svg)
-![Build Status](https://img.shields.io/badge/Build-Passing-brightgreen.svg)
 
 A low-level Zig email library (SMTP, IMAP, POP3) backed by **libcurl** for robust TLS and networking. Designed for explicit control and predictable memory usage, this is a **protocol and authentication layer**, not a rendering engine.
 
