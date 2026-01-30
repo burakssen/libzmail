@@ -2,6 +2,8 @@ const std = @import("std");
 const types = @import("types.zig");
 const protocols = @import("protocols.zig");
 
+const log = std.log.scoped(.protocol);
+
 pub fn Protocol(comptime tag: std.meta.Tag(types.ProtocolPayloadType), comptime ProviderType: type) type {
     const Payload = std.meta.TagPayload(types.ProtocolPayloadType, tag);
     const Impl = protocols.SmtpProtocol(ProviderType);

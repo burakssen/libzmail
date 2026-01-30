@@ -8,13 +8,15 @@ pub const std_options: std.Options = .{
     .logFn = utils.logFn,
 };
 
-const log = std.log.scoped(.main);
+const log = std.log.scoped(.libzmail);
 
 test {
     _ = auth;
     _ = utils;
 }
 // Test sending an email using SMTP with OAuth2 authentication
+
+const google_secret = @embedFile("secrets/google");
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -24,7 +26,7 @@ pub fn main() !void {
     const Protocol = protocol.Protocol(.smtp, Provider);
 
     var provider = Provider.init(allocator, .{
-        .client_id = "<client_id>",
+        .client_id = google_secret,
         .auth_endpoint = "https://accounts.google.com/o/oauth2/v2/auth",
         .token_endpoint = "https://oauth2.googleapis.com/token",
         .redirect_uri = "http://127.0.0.1:8080",
