@@ -22,13 +22,11 @@ jobs:
           - os: ubuntu-latest
             target: aarch64-linux
             zig_target: aarch64-linux-gnu
-            arch_pkg: arm64
           - os: ubuntu-latest
             target: riscv64-linux
             zig_target: riscv64-linux-gnu
-            arch_pkg: riscv64
           
-          # FreeBSD Target (Cross from Linux)
+          # FreeBSD Target (Cross-compile from Linux)
           - os: ubuntu-latest
             target: x86_64-freebsd
             zig_target: x86_64-freebsd
@@ -50,73 +48,34 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Install dependencies (Linux)
-        if: runner.os == 'Linux' && matrix.arch_pkg == ''
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libcurl4-openssl-dev
-
-      - name: Install Cross dependencies (Linux)
-        if: runner.os == 'Linux' && matrix.arch_pkg != ''
-        run: |
-          sudo dpkg --add-architecture ${{ matrix.arch_pkg }}
-          
-          # Configure sources for multi-arch
-          # Ubuntu 24.04 (noble) uses DEB822 format in /etc/apt/sources.list.d/ubuntu.sources
-          if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then
-            sudo sed -i 's/Architectures: /Architectures: amd64 /g' /etc/apt/sources.list.d/ubuntu.sources
-          fi
-          # Also handle old format if it exists
-          if [ -f /etc/apt/sources.list ]; then
-            sudo sed -i 's/^deb /deb [arch=amd64] /g' /etc/apt/sources.list
-          fi
-          
-          # Add ports repository for the cross architecture
-          echo "deb [arch=${{ matrix.arch_pkg }}] http://ports.ubuntu.com/ubuntu-ports $(lsb_release -cs) main restricted universe multiverse" | sudo tee /etc/apt/sources.list.d/ports.list
-          echo "deb [arch=${{ matrix.arch_pkg }}] http://ports.ubuntu.com/ubuntu-ports $(lsb_release -cs)-updates main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list.d/ports.list
-          echo "deb [arch=${{ matrix.arch_pkg }}] http://ports.ubuntu.com/ubuntu-ports $(lsb_release -cs)-security main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list.d/ports.list
-          
-          sudo apt-get update
-          sudo apt-get install -y libcurl4-openssl-dev:${{ matrix.arch_pkg }}
-
-      - name: Install dependencies (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          brew install curl
-
-      - name: Install dependencies (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          # Use vcpkg to install curl. GitHub Actions runners have vcpkg installed.
-          vcpkg install curl
-          # Set environment variables for Zig to find the headers
-          echo "CPATH=${env:VCPKG_INSTALLATION_ROOT}\installed\x64-windows\include" >> $env:GITHUB_ENV
-
       - name: Setup Zig
         uses: mlugg/setup-zig@v1
         with:
-          version: 0.15.2
+          version: 0.13.0
 
-      - name: Build
-        run: zig build -Dtarget=${{ matrix.zig_target }} --summary all
+      - name: Build static library
+        run: |
+          zig build -Dtarget=${{ matrix.zig_target }} -Doptimize=ReleaseSafe
 
-      - name: Rename and Prepare Artifact (Unix)
+      - name: Prepare artifact (Unix)
         if: runner.os != 'Windows'
         run: |
-          mv zig-out/lib/libzmail.a libzmail-${{ matrix.target }}.a
+          mkdir -p artifacts
+          cp zig-out/lib/libzmail.a artifacts/libzmail-${{ matrix.target }}.a
 
-      - name: Rename and Prepare Artifact (Windows)
+      - name: Prepare artifact (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          mv zig-out/lib/zmail.lib libzmail-${{ matrix.target }}.lib
+          New-Item -ItemType Directory -Force -Path artifacts
+          Copy-Item zig-out\lib\zmail.lib artifacts\libzmail-${{ matrix.target }}.lib
 
-      - name: Upload Artifact
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: libzmail-${{ matrix.target }}
-          path: libzmail-${{ matrix.target }}.*
+          path: artifacts/libzmail-${{ matrix.target }}.*
+          if-no-files-found: error
 
   release:
     name: Create Release
@@ -132,18 +91,22 @@ jobs:
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
+        with:
+          path: artifacts
 
       - name: Display structure of downloaded files
-        run: ls -R
+        run: ls -R artifacts/
 
-      - name: Move artifacts to root
+      - name: Prepare release assets
         run: |
-          mkdir release_assets
-          find . -name "libzmail-*.a" -exec mv {} release_assets/ \;
-          find . -name "libzmail-*.lib" -exec mv {} release_assets/ \;
+          mkdir -p release_assets
+          find artifacts -name "libzmail-*.a" -exec cp {} release_assets/ \;
+          find artifacts -name "libzmail-*.lib" -exec cp {} release_assets/ \;
+          ls -lh release_assets/
 
       - name: Create Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           files: release_assets/*
           generate_release_notes: true
+          fail_on_unmatched_files: true
