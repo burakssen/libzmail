@@ -8,12 +8,28 @@ pub const BasicPayload = struct {
     password: []const u8,
 };
 
-pub const OAuth2Payload = struct {
+const ClientOptions = struct {
     auth_endpoint: []const u8,
     token_endpoint: []const u8,
+    userinfo_endpoint: []const u8,
     redirect_uri: []const u8,
-    scope: ?[]const []const u8,
+    scopes: ?[]const []const u8,
+
+    pub const google = ClientOptions{
+        .auth_endpoint = "https://accounts.google.com/o/oauth2/v2/auth",
+        .token_endpoint = "https://oauth2.googleapis.com/token",
+        .userinfo_endpoint = "https://www.googleapis.com/oauth2/v2/userinfo",
+        .redirect_uri = "http://127.0.0.1:8080",
+        .scopes = &[_][]const u8{
+            "https://mail.google.com/",
+            "https://www.googleapis.com/auth/userinfo.email",
+        },
+    };
+};
+
+pub const OAuth2Payload = struct {
     client_id: []const u8,
+    client_options: ClientOptions,
 };
 
 pub const PayloadType = union(AuthType) {

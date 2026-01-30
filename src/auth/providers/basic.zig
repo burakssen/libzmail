@@ -1,7 +1,7 @@
 const std = @import("std");
-const c = @cImport(@cInclude("curl/curl.h"));
-
 const log = std.log.scoped(.basic_provider);
+
+const c = @cImport(@cInclude("curl/curl.h"));
 
 const types = @import("../types.zig");
 

@@ -27,13 +27,7 @@ pub fn main() !void {
 
     var provider = Provider.init(allocator, .{
         .client_id = google_secret,
-        .auth_endpoint = "https://accounts.google.com/o/oauth2/v2/auth",
-        .token_endpoint = "https://oauth2.googleapis.com/token",
-        .redirect_uri = "http://127.0.0.1:8080",
-        .scope = &[_][]const u8{
-            "https://mail.google.com/",
-            "https://www.googleapis.com/auth/userinfo.email",
-        },
+        .client_options = .google,
     });
     defer provider.deinit();
 
@@ -50,8 +44,8 @@ pub fn main() !void {
     try mail_protocol.connect();
 
     try mail_protocol.send(.{
-        .from = "mail@gmail.com",
-        .to = "mail2@gmail.com",
+        .from = "burak.pj@gmail.com",
+        .to = "burak.sen@tum.de",
         .subject = "Test Email",
         .body = "This is a test email sent from Zmail using SMTP protocol.",
     });

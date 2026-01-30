@@ -1,6 +1,8 @@
 const std = @import("std");
-const c = @cImport(@cInclude("curl/curl.h"));
 const log = std.log.scoped(.oauth2_provider);
+
+const c = @cImport(@cInclude("curl/curl.h"));
+
 const types = @import("../types.zig");
 
 const OAuth2Provider = @This();
@@ -61,7 +63,7 @@ fn performOAuth2Flow(self: *OAuth2Provider, curl: *c.CURL) !void {
     try self.openBrowser(auth_url);
 
     // Start local server and wait for code
-    log.info("Waiting for callback on {s}...", .{self.payload.redirect_uri});
+    log.info("Waiting for callback on {s}...", .{self.payload.client_options.redirect_uri});
     const auth_code_owned = try self.listenForCallback();
     defer self.allocator.free(auth_code_owned);
     const auth_code = auth_code_owned;
@@ -85,11 +87,9 @@ fn performOAuth2Flow(self: *OAuth2Provider, curl: *c.CURL) !void {
 }
 
 fn fetchUserInfo(self: *OAuth2Provider, curl: *c.CURL, access_token: []const u8) ![]const u8 {
-    const userinfo_endpoint = "https://www.googleapis.com/oauth2/v2/userinfo";
-
     _ = c.curl_easy_reset(curl);
 
-    const res1 = c.curl_easy_setopt(curl, c.CURLOPT_URL, userinfo_endpoint);
+    const res1 = c.curl_easy_setopt(curl, c.CURLOPT_URL, self.payload.client_options.userinfo_endpoint.ptr);
     if (res1 != c.CURLE_OK) return error.CurlSetoptFailed;
 
     const auth_header = try std.fmt.allocPrint(self.allocator, "Authorization: Bearer {s}", .{access_token});
@@ -170,7 +170,7 @@ fn openBrowser(self: *OAuth2Provider, url: []const u8) !void {
 }
 
 fn listenForCallback(self: *OAuth2Provider) ![]const u8 {
-    const uri = try std.Uri.parse(self.payload.redirect_uri);
+    const uri = try std.Uri.parse(self.payload.client_options.redirect_uri);
     const port = uri.port orelse return error.PortNotFoundInRedirectUri;
 
     // Listen on 127.0.0.1
@@ -285,7 +285,7 @@ fn urlEncode(self: *OAuth2Provider, input: []const u8) ![]const u8 {
 
 fn buildAuthorizationUrl(self: *OAuth2Provider, code_challenge: []const u8) ![]const u8 {
     // URL encode the redirect_uri
-    const encoded_redirect = try self.urlEncode(self.payload.redirect_uri);
+    const encoded_redirect = try self.urlEncode(self.payload.client_options.redirect_uri);
     defer self.allocator.free(encoded_redirect);
 
     var url: std.Io.Writer.Allocating = .init(self.allocator);
@@ -293,19 +293,19 @@ fn buildAuthorizationUrl(self: *OAuth2Provider, code_challenge: []const u8) ![]c
 
     const writer = &url.writer;
     try writer.print("{s}?response_type=code&client_id={s}&redirect_uri={s}&code_challenge={s}&code_challenge_method=S256", .{
-        self.payload.auth_endpoint,
+        self.payload.client_options.auth_endpoint,
         self.payload.client_id,
         encoded_redirect,
         code_challenge,
     });
 
     // Add scope if provided
-    if (self.payload.scope) |scopes| {
-        if (scopes.len > 0) {
+    if (self.payload.client_options.scopes) |scope| {
+        if (scope.len > 0) {
             try writer.writeAll("&scope=");
-            for (scopes, 0..) |scope, i| {
+            for (scope, 0..) |_scope, i| {
                 if (i > 0) try writer.writeAll("%20");
-                const encoded_scope = try self.urlEncode(scope);
+                const encoded_scope = try self.urlEncode(_scope);
                 defer self.allocator.free(encoded_scope);
                 try writer.writeAll(encoded_scope);
             }
@@ -320,7 +320,7 @@ fn exchangeCodeForToken(self: *OAuth2Provider, curl: *c.CURL, auth_code: []const
     const encoded_code = try self.urlEncode(auth_code);
     defer self.allocator.free(encoded_code);
 
-    const encoded_redirect = try self.urlEncode(self.payload.redirect_uri);
+    const encoded_redirect = try self.urlEncode(self.payload.client_options.redirect_uri);
     defer self.allocator.free(encoded_redirect);
 
     const encoded_client_id = try self.urlEncode(self.payload.client_id);
@@ -341,7 +341,7 @@ fn exchangeCodeForToken(self: *OAuth2Provider, curl: *c.CURL, auth_code: []const
     });
 
     // Set up curl for token exchange
-    const res1 = c.curl_easy_setopt(curl, c.CURLOPT_URL, self.payload.token_endpoint.ptr);
+    const res1 = c.curl_easy_setopt(curl, c.CURLOPT_URL, self.payload.client_options.token_endpoint.ptr);
     if (res1 != c.CURLE_OK) {
         log.err("Failed to set token endpoint URL: {s}", .{c.curl_easy_strerror(res1)});
         return error.CurlSetoptFailed;
