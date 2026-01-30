@@ -11,4 +11,6 @@ A low-level Zig email library (SMTP, IMAP, POP3) backed by **libcurl** for robus
 * **Auth:** 
     - [x] Basic
     - [x] OAuth2
+        - [x] Google
+        - [x] Microsoft
     - [ ] SAML/SSO
