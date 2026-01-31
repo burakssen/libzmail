@@ -1,0 +1,229 @@
+name: Zig Build Static Library - Multi-Platform
+on:
+  push:
+    branches: [ main, master ]
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  build-matrix:
+    strategy:
+      matrix:
+        include:
+          # Linux targets
+          - os: ubuntu-latest
+            target: x86_64-linux
+            artifact_name: linux-x86_64
+            setup_deps: |
+              sudo apt-get update
+              sudo apt-get install -y libcurl4-openssl-dev curl
+          
+          - os: ubuntu-latest
+            target: aarch64-linux
+            artifact_name: linux-aarch64
+            setup_deps: |
+              sudo apt-get update
+              sudo apt-get install -y libcurl4-openssl-dev curl gcc-aarch64-linux-gnu
+          
+          - os: ubuntu-latest
+            target: riscv64-linux
+            artifact_name: linux-riscv64
+            setup_deps: |
+              sudo apt-get update
+              sudo apt-get install -y libcurl4-openssl-dev curl gcc-riscv64-linux-gnu
+          
+          # macOS targets
+          - os: macos-latest
+            target: x86_64-macos
+            artifact_name: macos-x86_64
+            setup_deps: |
+              brew install curl pkg-config
+          
+          - os: macos-latest
+            target: aarch64-macos
+            artifact_name: macos-aarch64
+            setup_deps: |
+              brew install curl pkg-config
+          
+          # Windows targets
+          - os: windows-latest
+            target: x86_64-windows
+            artifact_name: windows-x86_64
+            setup_deps: |
+              choco install curl -y
+          
+          - os: windows-latest
+            target: aarch64-windows
+            artifact_name: windows-aarch64
+            setup_deps: |
+              choco install curl -y
+
+    runs-on: ${{ matrix.os }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup dependencies
+        shell: bash
+        run: ${{ matrix.setup_deps }}
+      
+      - name: Setup Zig
+        uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: 0.15.2
+      
+      - name: Verify Zig installation
+        run: zig version
+      
+      - name: Build static library
+        shell: bash
+        run: |
+          zig build -Doptimize=ReleaseSafe -Dtarget=${{ matrix.target }}
+      
+      - name: List built artifacts (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          ls -lh zig-out/lib/
+          file zig-out/lib/*.a || file zig-out/lib/*.lib || true
+      
+      - name: List built artifacts (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          Get-ChildItem -Path zig-out\lib\ -Recurse
+      
+      - name: Prepare artifacts for upload
+        shell: bash
+        run: |
+          mkdir -p artifacts
+          if [ -d "zig-out/lib" ]; then
+            cp zig-out/lib/*.a artifacts/ 2>/dev/null || true
+            cp zig-out/lib/*.lib artifacts/ 2>/dev/null || true
+          fi
+      
+      - name: Upload static library artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: static-library-${{ matrix.artifact_name }}
+          path: artifacts/*
+          retention-days: 30
+          if-no-files-found: error
+
+  create-release:
+    needs: build-matrix
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+      
+      - name: Display structure of downloaded files
+        run: ls -R release-artifacts
+      
+      - name: Organize release files
+        run: |
+          mkdir -p release-files
+          
+          # Copy and rename artifacts with platform identifiers
+          for dir in release-artifacts/*/; do
+            platform=$(basename "$dir")
+            for file in "$dir"*; do
+              if [ -f "$file" ]; then
+                filename=$(basename "$file")
+                # Extract base name and extension
+                base="${filename%.*}"
+                ext="${filename##*.}"
+                # Create new filename with platform
+                new_name="${base}-${platform}.${ext}"
+                cp "$file" "release-files/${new_name}"
+              fi
+            done
+          done
+          
+          ls -lh release-files/
+      
+      - name: Generate release notes
+        run: |
+          cat > RELEASE_NOTES.md << 'EOF'
+          # Release ${{ github.ref_name }}
+          
+          ## Static Libraries Built For:
+          
+          ### Linux
+          - **x86_64** (Intel/AMD 64-bit)
+          - **aarch64** (ARM 64-bit)
+          - **riscv64** (RISC-V 64-bit)
+          
+          ### macOS
+          - **x86_64** (Intel Macs)
+          - **aarch64** (Apple Silicon M1/M2/M3)
+          
+          ### Windows
+          - **x86_64** (64-bit)
+          - **aarch64** (ARM64)
+          
+          ## Build Information
+          - Zig Version: 0.15.2
+          - Optimization: ReleaseSafe
+          - Build Date: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          
+          ## Installation
+          Download the appropriate `.a` or `.lib` file for your platform and link it with your project.
+          
+          ## Notes
+          All libraries are statically compiled for maximum portability.
+          EOF
+          
+          cat RELEASE_NOTES.md
+      
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-files/*
+          body_path: RELEASE_NOTES.md
+          draft: false
+          prerelease: ${{ contains(github.ref, 'alpha') || contains(github.ref, 'beta') || contains(github.ref, 'rc') }}
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build-summary:
+    needs: build-matrix
+    runs-on: ubuntu-latest
+    if: always()
+    
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: all-artifacts
+        continue-on-error: true
+      
+      - name: Build Summary
+        run: |
+          echo "# Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## Artifacts Built:" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [ -d "all-artifacts" ]; then
+            for dir in all-artifacts/*/; do
+              if [ -d "$dir" ]; then
+                platform=$(basename "$dir")
+                echo "### $platform" >> $GITHUB_STEP_SUMMARY
+                ls -lh "$dir" >> $GITHUB_STEP_SUMMARY 2>/dev/null || echo "No files" >> $GITHUB_STEP_SUMMARY
+                echo "" >> $GITHUB_STEP_SUMMARY
+              fi
+            done
+          else
+            echo "No artifacts found" >> $GITHUB_STEP_SUMMARY
+          fi
