@@ -1,0 +1,54 @@
+name: Build Linux x86_64
+
+on:
+  push:
+    branches: [ main, master ]
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcurl4-openssl-dev curl pkg-config
+      
+      - name: Setup Zig
+        uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: 0.15.2
+      
+      - name: Verify installations
+        run: |
+          zig version
+          curl-config --version
+          pkg-config --modversion libcurl
+      
+      - name: Build static library
+        run: |
+          zig build -Doptimize=ReleaseSafe -Dtarget=x86_64-linux
+      
+      - name: List built artifacts
+        run: |
+          ls -lh zig-out/lib/
+          file zig-out/lib/*.a
+      
+      - name: Prepare artifacts
+        run: |
+          mkdir -p artifacts
+          cp zig-out/lib/*.a artifacts/
+      
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: static-library-x86_64-linux
+          path: artifacts/*
+          retention-days: 30

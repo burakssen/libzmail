@@ -1,0 +1,94 @@
+name: Create Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  create-release:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Wait for build workflows
+        run: |
+          echo "Waiting for build workflows to complete..."
+          sleep 60
+      
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+      
+      - name: Display structure of downloaded files
+        run: ls -R release-artifacts
+      
+      - name: Organize release files
+        run: |
+          mkdir -p release-files
+          
+          # Copy and rename artifacts with platform identifiers
+          for dir in release-artifacts/*/; do
+            if [ -d "$dir" ]; then
+              platform=$(basename "$dir" | sed 's/static-library-//')
+              for file in "$dir"*; do
+                if [ -f "$file" ]; then
+                  filename=$(basename "$file")
+                  base="${filename%.*}"
+                  ext="${filename##*.}"
+                  new_name="${base}-${platform}.${ext}"
+                  cp "$file" "release-files/${new_name}"
+                fi
+              done
+            fi
+          done
+          
+          echo "Release files:"
+          ls -lh release-files/
+      
+      - name: Generate release notes
+        run: |
+          cat > RELEASE_NOTES.md << 'EOF'
+          # Release ${{ github.ref_name }}
+          
+          ## Static Libraries Built For:
+          
+          ### Linux
+          - **x86_64** - Intel/AMD 64-bit
+          - **aarch64** - ARM 64-bit (Raspberry Pi, ARM servers)
+          
+          ### macOS
+          - **x86_64** - Intel Macs
+          - **aarch64** - Apple Silicon (M1/M2/M3/M4)
+          
+          ### Windows
+          - **x86_64** - 64-bit
+          
+          ## Build Information
+          - **Zig Version**: 0.15.2
+          - **Optimization**: ReleaseSafe
+          - **Build Date**: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          
+          ## Usage
+          Download the appropriate `.a` or `.lib` file for your platform and link it with your project.
+          
+          ## Notes
+          - All libraries are natively compiled on their respective platforms
+          - Dependencies are statically linked where possible
+          EOF
+          
+          cat RELEASE_NOTES.md
+      
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-files/*
+          body_path: RELEASE_NOTES.md
+          draft: false
+          prerelease: ${{ contains(github.ref, 'alpha') || contains(github.ref, 'beta') || contains(github.ref, 'rc') }}
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
