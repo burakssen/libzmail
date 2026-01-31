@@ -28,7 +28,7 @@ jobs:
 
       - name: Build x86_64
         # We explicitly point to the x86_64 library path
-        run: zig build -Doptimize=ReleaseSafe -Dtarget=x86_64-linux --search-prefix /usr/lib/x86_64-linux-gnu
+        run: zig build -Doptimize=ReleaseSafe -Dtarget=x86_64-linux --search-prefix /usr
 
       - name: Upload x86_64 Artifact
         uses: actions/upload-artifact@v4
@@ -61,7 +61,7 @@ jobs:
 
       - name: Build AArch64
         # Note the changed target and search-prefix for ARM
-        run: zig build -Doptimize=ReleaseSafe -Dtarget=aarch64-linux --search-prefix /usr/lib/aarch64-linux-gnu
+        run: zig build -Doptimize=ReleaseSafe -Dtarget=aarch64-linux --search-prefix /usr
 
       - name: Upload AArch64 Artifact
         uses: actions/upload-artifact@v4
