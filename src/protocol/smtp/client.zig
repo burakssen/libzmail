@@ -4,7 +4,7 @@ const utils = @import("utils");
 const types = @import("types.zig");
 const log = std.log.scoped(.smtp);
 
-pub fn SmtpProtocol(comptime ProviderType: type) type {
+pub fn Client(comptime ProviderType: type) type {
     return struct {
         const Self = @This();
 

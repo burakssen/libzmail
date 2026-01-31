@@ -4,7 +4,7 @@ const utils = @import("utils");
 const types = @import("types.zig");
 const log = std.log.scoped(.imap);
 
-pub fn ImapProtocol(comptime ProviderType: type) type {
+pub fn Client(comptime ProviderType: type) type {
     return struct {
         const Self = @This();
 
@@ -52,7 +52,7 @@ pub fn ImapProtocol(comptime ProviderType: type) type {
             try self.configureListRequest(url, &response.writer);
             try self.curl.perform();
 
-            log.info("Mailboxes listed successfully", .{} );
+            log.info("Mailboxes listed successfully", .{});
             return response.toOwnedSlice();
         }
 
