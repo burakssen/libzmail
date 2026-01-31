@@ -8,16 +8,16 @@ A low-level Zig email library (SMTP, IMAP, POP3) backed by **libcurl** for robus
 ## Features
 
 ### Protocol Support
-- **SMTP** - Full email sending capability with TLS support
-- **IMAP** - Email retrieval and mailbox management
-- **POP3** - Planned for simple email retrieval
+- [x] **SMTP** - Full email sending capability with TLS support
+- [x] **IMAP** - Email retrieval and mailbox management
+- [ ] **POP3** - Planned for simple email retrieval
 
 ### Authentication Methods
-- **Basic Authentication** - Username/password support
-- **OAuth 2.0** - Modern, secure authentication with major providers:
-  - **Google** - Gmail, Google Workspace
-  - **Microsoft** - Outlook, Office 365
-- **SAML/SSO** - Enterprise authentication (planned)
+- [x] **Basic Authentication** - Username/password support
+- [x] **OAuth 2.0** - Modern, secure authentication with major providers:
+  - [x] **Google** - Gmail, Google Workspace
+  - [x] **Microsoft** - Outlook, Office 365
+- [ ] **SAML/SSO** - Enterprise authentication (planned)
 
 ## Installation
 
