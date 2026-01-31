@@ -9,7 +9,7 @@ A low-level Zig email library (SMTP, IMAP, POP3) backed by **libcurl** for robus
 
 ### 🚀 **Protocol Support**
 - ✅ **SMTP** - Full email sending capability with TLS support
-- 🔄 **IMAP** - Planned for email retrieval and management
+- ✅ **IMAP** - Email retrieval and mailbox management
 - 🔄 **POP3** - Planned for simple email retrieval
 
 ### 🔐 **Authentication Methods**
@@ -26,29 +26,6 @@ A low-level Zig email library (SMTP, IMAP, POP3) backed by **libcurl** for robus
 - **Zig** version 0.15.2 or later
 - **libcurl** development libraries
 
-### Building libzmail
-
-1. **Clone the repository**
-```bash
-git clone https://github.com/yourusername/libzmail.git
-cd libzmail
-```
-
-2. **Build the library**
-```bash
-zig build
-```
-
-3. **Run the example**
-```bash
-zig build run
-```
-
-4. **Run tests**
-```bash
-zig build test
-```
-
 ### Using as a Dependency
 
 Add libzmail to your project using Zig's package manager:
@@ -63,16 +40,7 @@ const libzmail = b.dependency("libzmail", .{
     .target = target,
     .optimize = optimize,
 });
-exe.linkLibrary(libzmail.artifact("libzmail"));
-```
-
-And in your `build.zig`:
-```zig
-const libzmail = b.dependency("libzmail", .{
-    .target = target,
-    .optimize = optimize,
-});
-exe.linkLibrary(libzmail.artifact("libzmail"));
+exe.root_module.addImport("libzmail", libzmail.module("libzmail"));
 ```
 
 ## Quick Start
@@ -88,31 +56,30 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    const Provider = auth.Provider(.basic);
-    const SmtpProtocol = protocol.Protocol(.smtp, Provider);
-
-    const provider = Provider.init(allocator, .{
-        .username = "test@email.com",
-        .password = "pass",
+    // 1. Initialize Authentication Provider
+    const Provider = libzmail.auth.Provider(.basic);
+    var provider = Provider.init(allocator, .{
+        .username = "user@example.com",
+        .password = "your_password",
     });
+    defer provider.deinit();
 
-    _ = c.curl_global_init(0);
-    defer c.curl_global_cleanup();
-
-    var smtp_protocol = SmtpProtocol.init(allocator, .{
-        .hostname = "smtp.server.com",
+    // 2. Initialize SMTP Client
+    const SmtpClient = libzmail.protocol.smtp.Client(Provider);
+    var smtp_client = try SmtpClient.init(allocator, .{
+        .hostname = "smtp.example.com",
         .port = 587,
-        .use_tls = true,
     }, provider);
-    defer smtp_protocol.deinit();
+    defer smtp_client.deinit();
 
-    try smtp_protocol.connect();
+    // 3. Connect and Send
+    try smtp_client.connect();
 
-    try smtp_protocol.send(.{
-        .from = "test@email.com",
-        .to = "recipient@email.com",
-        .subject = "Test Email",
-        .body = "This is a test email sent from Zmail using SMTP protocol.",
+    try smtp_client.send(.{
+        .from = "user@example.com",
+        .to = "recipient@example.com",
+        .subject = "Hello from Zig!",
+        .body = "This email was sent using libzmail.",
     });
 }
 ```
@@ -122,52 +89,83 @@ pub fn main() !void {
 ```zig
 const std = @import("std");
 const libzmail = @import("libzmail");
-const google_secret = @embedFile("google_secret");
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    const Provider = auth.Provider(.oauth2);
-    const SmtpProtocol = protocol.Protocol(.smtp, Provider);
-
-    const provider = Provider.init(allocator, .{
-        .client_id = google_secret,
-        .client_options = .google,
+    // 1. Initialize OAuth2 Provider
+    const Provider = libzmail.auth.Provider(.oauth2);
+    var provider = Provider.init(allocator, .{
+        .client_id = "YOUR_GOOGLE_CLIENT_ID",
+        .client_options = libzmail.auth.types.ClientOptions.google,
     });
+    defer provider.deinit();
 
-    _ = c.curl_global_init(0);
-    defer c.curl_global_cleanup();
-
-    var smtp_protocol = SmtpProtocol.init(allocator, .{
+    // 2. Initialize SMTP Client
+    const SmtpClient = libzmail.protocol.smtp.Client(Provider);
+    var smtp_client = try SmtpClient.init(allocator, .{
         .hostname = "smtp.gmail.com",
         .port = 587,
-        .use_tls = true,
     }, provider);
-    defer smtp_protocol.deinit();
+    defer smtp_client.deinit();
 
-    try smtp_protocol.connect();
+    // 3. Authenticate and Send
+    // This will automatically handle the OAuth2 flow and open a browser if needed
+    try smtp_client.connect();
 
-    try smtp_protocol.send(.{
-        .from = "test@gmail.com",
+    try smtp_client.send(.{
+        .from = "your-email@gmail.com",
         .to = "recipient@example.com",
-        .subject = "Test Email",
-        .body = "This is a test email sent from Zmail using SMTP protocol.",
+        .subject = "OAuth2 Email",
+        .body = "Authenticated via Google OAuth2!",
     });
 }
 ```
 
-### OAuth2 with Microsoft Outlook
+### IMAP Mailbox Listing
 
 ```zig
-// Similar to Google, but use .microsoft instead of .google
-const provider = Provider.init(allocator, .{
-    .client_id = microsoft_secret,
-    .client_options = .microsoft,
-});
+const std = @import("std");
+const libzmail = @import("libzmail");
+
+pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    // 1. Initialize Provider
+    const Provider = libzmail.auth.Provider(.basic);
+    var provider = Provider.init(allocator, .{
+        .username = "user@example.com",
+        .password = "your_password",
+    });
+    defer provider.deinit();
+
+    // 2. Initialize IMAP Client
+    const ImapClient = libzmail.protocol.imap.Client(Provider);
+    var imap_client = try ImapClient.init(allocator, .{
+        .hostname = "imap.example.com",
+        .port = 993,
+    }, provider);
+    defer imap_client.deinit();
+
+    // 3. Connect and List Mailboxes
+    try imap_client.connect();
+
+    const mailboxes = try imap_client.listMailboxes();
+    defer {
+        for (mailboxes) |*mb| mb.deinit(allocator);
+        allocator.free(mailboxes);
+    }
+
+    for (mailboxes) |mb| {
+        std.debug.print("Mailbox: {s} (Type: {s})\n", .{ mb.name, mb.getType() });
+    }
+}
 ```
 
 ## License
 
 This project is licensed under the **MIT License** - see the [LICENSE](LICENSE) file for details.
-

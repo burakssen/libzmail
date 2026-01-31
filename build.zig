@@ -35,9 +35,7 @@ pub fn build(b: *std.Build) void {
 
     protocol_mod.linkSystemLibrary("curl", .{});
 
-    const libzmail_mod = b.createModule(.{
-        .target = target,
-        .optimize = optimize,
+    const libzmail_mod = b.addModule("libzmail", .{
         .root_source_file = b.path("src/libzmail.zig"),
         .imports = &.{
             .{ .name = "auth", .module = auth_mod },
@@ -52,17 +50,6 @@ pub fn build(b: *std.Build) void {
     });
 
     b.installArtifact(libzmail_lib);
-
-    {
-        const libzmail_exe = b.addExecutable(.{
-            .name = "libzmail",
-            .root_module = libzmail_mod,
-        });
-
-        const run_step = b.step("run", "Run the libzmail executable");
-        const run_cmd = b.addRunArtifact(libzmail_exe);
-        run_step.dependOn(&run_cmd.step);
-    }
 
     const test_step = b.step("test", "Run tests");
 
