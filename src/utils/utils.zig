@@ -1,5 +1,7 @@
 const std = @import("std");
 
+pub const CurlHandle = @import("curl_handle.zig");
+
 pub fn logFn(
     comptime level: std.log.Level,
     comptime scope: @TypeOf(.EnumLiteral),

@@ -53,6 +53,17 @@ pub fn build(b: *std.Build) void {
 
     b.installArtifact(libzmail_lib);
 
+    {
+        const libzmail_exe = b.addExecutable(.{
+            .name = "libzmail",
+            .root_module = libzmail_mod,
+        });
+
+        const run_step = b.step("run", "Run the libzmail executable");
+        const run_cmd = b.addRunArtifact(libzmail_exe);
+        run_step.dependOn(&run_cmd.step);
+    }
+
     const test_step = b.step("test", "Run tests");
 
     inline for (&.{ auth_mod, libzmail_mod }) |mod| {

@@ -1,15 +1,13 @@
-pub const ProtocolType = enum {
-    smtp,
-};
-
 pub const SmtpPayload = struct {
     hostname: []const u8,
     port: u16 = 587,
     use_tls: bool = true,
 };
 
-pub const ProtocolPayloadType = union(ProtocolType) {
-    smtp: SmtpPayload,
+pub const ImapPayload = struct {
+    hostname: []const u8,
+    port: u16 = 993,
+    use_tls: bool = true,
 };
 
 pub const MailPayload = struct {
