@@ -8,67 +8,117 @@ on:
     branches: [ main, master ]
 
 jobs:
-  build-matrix:
+  build-linux:
+    runs-on: ubuntu-latest
     strategy:
       matrix:
-        include:
-          # Linux targets
-          - os: ubuntu-latest
-            target: x86_64-linux
-            artifact_name: linux-x86_64
-            setup_deps: |
-              sudo apt-get update
-              sudo apt-get install -y libcurl4-openssl-dev curl
-          
-          - os: ubuntu-latest
-            target: aarch64-linux
-            artifact_name: linux-aarch64
-            setup_deps: |
-              sudo apt-get update
-              sudo apt-get install -y libcurl4-openssl-dev curl gcc-aarch64-linux-gnu
-          
-          - os: ubuntu-latest
-            target: riscv64-linux
-            artifact_name: linux-riscv64
-            setup_deps: |
-              sudo apt-get update
-              sudo apt-get install -y libcurl4-openssl-dev curl gcc-riscv64-linux-gnu
-          
-          # macOS targets
-          - os: macos-latest
-            target: x86_64-macos
-            artifact_name: macos-x86_64
-            setup_deps: |
-              brew install curl pkg-config
-          
-          - os: macos-latest
-            target: aarch64-macos
-            artifact_name: macos-aarch64
-            setup_deps: |
-              brew install curl pkg-config
-          
-          # Windows targets
-          - os: windows-latest
-            target: x86_64-windows
-            artifact_name: windows-x86_64
-            setup_deps: |
-              choco install curl -y
-          
-          - os: windows-latest
-            target: aarch64-windows
-            artifact_name: windows-aarch64
-            setup_deps: |
-              choco install curl -y
-
-    runs-on: ${{ matrix.os }}
+        target: 
+          - x86_64-linux
+          - aarch64-linux
+          - riscv64-linux
     
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
       
-      - name: Setup dependencies
-        shell: bash
-        run: ${{ matrix.setup_deps }}
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcurl4-openssl-dev curl pkg-config
+      
+      - name: Setup Zig
+        uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: 0.15.2
+      
+      - name: Verify installations
+        run: |
+          zig version
+          curl-config --version || true
+          pkg-config --modversion libcurl || true
+      
+      - name: Build static library
+        run: |
+          zig build -Doptimize=ReleaseSafe -Dtarget=${{ matrix.target }}
+      
+      - name: List built artifacts
+        run: |
+          ls -lh zig-out/lib/ || true
+          file zig-out/lib/*.a 2>/dev/null || true
+      
+      - name: Prepare artifacts
+        run: |
+          mkdir -p artifacts
+          cp zig-out/lib/*.a artifacts/ 2>/dev/null || true
+      
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: static-library-${{ matrix.target }}
+          path: artifacts/*
+          retention-days: 30
+
+  build-macos:
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-macos
+            arch: x86_64
+          - target: aarch64-macos
+            arch: arm64
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Install dependencies
+        run: |
+          brew install curl pkg-config
+      
+      - name: Setup Zig
+        uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: 0.15.2
+      
+      - name: Verify installations
+        run: |
+          zig version
+          curl-config --version || true
+          pkg-config --version || true
+      
+      - name: Build static library
+        run: |
+          zig build -Doptimize=ReleaseSafe -Dtarget=${{ matrix.target }}
+      
+      - name: List built artifacts
+        run: |
+          ls -lh zig-out/lib/ || true
+          file zig-out/lib/*.a 2>/dev/null || true
+      
+      - name: Prepare artifacts
+        run: |
+          mkdir -p artifacts
+          cp zig-out/lib/*.a artifacts/ 2>/dev/null || true
+      
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: static-library-${{ matrix.target }}
+          path: artifacts/*
+          retention-days: 30
+
+  build-windows:
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        target:
+          - x86_64-windows
+          - aarch64-windows
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
       
       - name: Setup Zig
         uses: goto-bus-stop/setup-zig@v2
@@ -83,37 +133,27 @@ jobs:
         run: |
           zig build -Doptimize=ReleaseSafe -Dtarget=${{ matrix.target }}
       
-      - name: List built artifacts (Unix)
-        if: runner.os != 'Windows'
-        run: |
-          ls -lh zig-out/lib/
-          file zig-out/lib/*.a || file zig-out/lib/*.lib || true
-      
-      - name: List built artifacts (Windows)
-        if: runner.os == 'Windows'
+      - name: List built artifacts
         shell: powershell
         run: |
-          Get-ChildItem -Path zig-out\lib\ -Recurse
+          Get-ChildItem -Path zig-out\lib\ -Recurse -ErrorAction SilentlyContinue
       
-      - name: Prepare artifacts for upload
+      - name: Prepare artifacts
         shell: bash
         run: |
           mkdir -p artifacts
-          if [ -d "zig-out/lib" ]; then
-            cp zig-out/lib/*.a artifacts/ 2>/dev/null || true
-            cp zig-out/lib/*.lib artifacts/ 2>/dev/null || true
-          fi
+          cp zig-out/lib/*.a artifacts/ 2>/dev/null || true
+          cp zig-out/lib/*.lib artifacts/ 2>/dev/null || true
       
-      - name: Upload static library artifact
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: static-library-${{ matrix.artifact_name }}
+          name: static-library-${{ matrix.target }}
           path: artifacts/*
           retention-days: 30
-          if-no-files-found: error
 
   create-release:
-    needs: build-matrix
+    needs: [build-linux, build-macos, build-windows]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
     
@@ -135,20 +175,21 @@ jobs:
           
           # Copy and rename artifacts with platform identifiers
           for dir in release-artifacts/*/; do
-            platform=$(basename "$dir")
-            for file in "$dir"*; do
-              if [ -f "$file" ]; then
-                filename=$(basename "$file")
-                # Extract base name and extension
-                base="${filename%.*}"
-                ext="${filename##*.}"
-                # Create new filename with platform
-                new_name="${base}-${platform}.${ext}"
-                cp "$file" "release-files/${new_name}"
-              fi
-            done
+            if [ -d "$dir" ]; then
+              platform=$(basename "$dir" | sed 's/static-library-//')
+              for file in "$dir"*; do
+                if [ -f "$file" ]; then
+                  filename=$(basename "$file")
+                  base="${filename%.*}"
+                  ext="${filename##*.}"
+                  new_name="${base}-${platform}.${ext}"
+                  cp "$file" "release-files/${new_name}"
+                fi
+              done
+            fi
           done
           
+          echo "Release files:"
           ls -lh release-files/
       
       - name: Generate release notes
@@ -159,24 +200,24 @@ jobs:
           ## Static Libraries Built For:
           
           ### Linux
-          - **x86_64** (Intel/AMD 64-bit)
-          - **aarch64** (ARM 64-bit)
-          - **riscv64** (RISC-V 64-bit)
+          - **x86_64** - Intel/AMD 64-bit
+          - **aarch64** - ARM 64-bit (Raspberry Pi, ARM servers)
+          - **riscv64** - RISC-V 64-bit
           
           ### macOS
-          - **x86_64** (Intel Macs)
-          - **aarch64** (Apple Silicon M1/M2/M3)
+          - **x86_64** - Intel Macs
+          - **aarch64** - Apple Silicon (M1/M2/M3/M4)
           
           ### Windows
-          - **x86_64** (64-bit)
-          - **aarch64** (ARM64)
+          - **x86_64** - 64-bit
+          - **aarch64** - ARM64 (Surface, Copilot+ PCs)
           
           ## Build Information
-          - Zig Version: 0.15.2
-          - Optimization: ReleaseSafe
-          - Build Date: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          - **Zig Version**: 0.15.2
+          - **Optimization**: ReleaseSafe
+          - **Build Date**: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
           
-          ## Installation
+          ## Usage
           Download the appropriate `.a` or `.lib` file for your platform and link it with your project.
           
           ## Notes
@@ -197,33 +238,18 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   build-summary:
-    needs: build-matrix
+    needs: [build-linux, build-macos, build-windows]
     runs-on: ubuntu-latest
     if: always()
     
     steps:
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: all-artifacts
-        continue-on-error: true
-      
       - name: Build Summary
         run: |
-          echo "# Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "# Multi-Platform Build Complete" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "## Artifacts Built:" >> $GITHUB_STEP_SUMMARY
+          echo "Built static libraries for:" >> $GITHUB_STEP_SUMMARY
+          echo "- Linux: x86_64, aarch64, riscv64" >> $GITHUB_STEP_SUMMARY
+          echo "- macOS: x86_64, aarch64" >> $GITHUB_STEP_SUMMARY
+          echo "- Windows: x86_64, aarch64" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          
-          if [ -d "all-artifacts" ]; then
-            for dir in all-artifacts/*/; do
-              if [ -d "$dir" ]; then
-                platform=$(basename "$dir")
-                echo "### $platform" >> $GITHUB_STEP_SUMMARY
-                ls -lh "$dir" >> $GITHUB_STEP_SUMMARY 2>/dev/null || echo "No files" >> $GITHUB_STEP_SUMMARY
-                echo "" >> $GITHUB_STEP_SUMMARY
-              fi
-            done
-          else
-            echo "No artifacts found" >> $GITHUB_STEP_SUMMARY
-          fi
+          echo "Total platforms: 7" >> $GITHUB_STEP_SUMMARY
