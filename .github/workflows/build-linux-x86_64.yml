@@ -20,6 +20,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libcurl4-openssl-dev curl pkg-config
+          # Create a symlink so Zig finds libcurl in the standard /usr/lib location
+          sudo ln -s /usr/lib/x86_64-linux-gnu/libcurl.so /usr/lib/libcurl.so
       
       - name: Setup Zig
         uses: goto-bus-stop/setup-zig@v2
