@@ -36,6 +36,8 @@ pub fn build(b: *std.Build) void {
     protocol_mod.linkSystemLibrary("curl", .{});
 
     const libzmail_mod = b.addModule("libzmail", .{
+        .target = target,
+        .optimize = optimize,
         .root_source_file = b.path("src/libzmail.zig"),
         .imports = &.{
             .{ .name = "auth", .module = auth_mod },
