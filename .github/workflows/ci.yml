@@ -31,7 +31,7 @@ jobs:
         pkg-config --modversion libcurl
 
     - name: Build static library
-      run: zig build-lib -static src/main.zig -lc -lcurl
+      run: zig build -Doptimize=ReleaseSafe
 
     - name: List built artifacts
       run: |
