@@ -20,7 +20,7 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    auth_mod.linkSystemLibrary("curl", .{});
+    auth_mod.linkSystemLibrary("curl", .{ .preferred_link_mode = .static });
 
     const protocol_mod = b.createModule(.{
         .target = target,
