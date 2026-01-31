@@ -1,0 +1,100 @@
+name: Build Multi-Arch Static Libraries
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  # ---------------------------------------------------
+  # JOB 1: Build for x86_64 (Standard Intel/AMD)
+  # ---------------------------------------------------
+  build-x86_64:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install dependencies (x86)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcurl4-openssl-dev curl pkg-config
+
+      - name: Setup Zig
+        uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - name: Build x86_64
+        # We explicitly point to the x86_64 library path
+        run: zig build -Doptimize=ReleaseSafe -Dtarget=x86_64-linux --search-prefix /usr/lib/x86_64-linux-gnu
+
+      - name: Upload x86_64 Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: static-library-linux-x86_64
+          path: 'zig-out/lib/*.a'
+          retention-days: 30
+
+  # ---------------------------------------------------
+  # JOB 2: Build for AArch64 (ARM64)
+  # ---------------------------------------------------
+  build-aarch64:
+    # This uses a native ARM runner.
+    # If this fails (due to plan restrictions), see "Option 2" below.
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install dependencies (ARM64)
+        run: |
+          sudo apt-get update
+          # On an ARM runner, this installs the ARM64 version of libcurl automatically
+          sudo apt-get install -y libcurl4-openssl-dev curl pkg-config
+
+      - name: Setup Zig
+        uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - name: Build AArch64
+        # Note the changed target and search-prefix for ARM
+        run: zig build -Doptimize=ReleaseSafe -Dtarget=aarch64-linux --search-prefix /usr/lib/aarch64-linux-gnu
+
+      - name: Upload AArch64 Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: static-library-linux-aarch64
+          path: 'zig-out/lib/*.a'
+          retention-days: 30
+
+  # ---------------------------------------------------
+  # JOB 3: Release (Optional - runs only on tags)
+  # ---------------------------------------------------
+  release:
+    needs: [build-x86_64, build-aarch64]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download x86 Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: static-library-linux-x86_64
+          path: release-dist/x86_64
+
+      - name: Download ARM64 Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: static-library-linux-aarch64
+          path: release-dist/aarch64
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            release-dist/x86_64/*.a
+            release-dist/aarch64/*.a
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
