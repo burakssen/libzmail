@@ -6,42 +6,44 @@ pub fn logFn(
     comptime format: []const u8,
     args: anytype,
 ) void {
-    const level_txt = comptime level.asText();
-    const prefix = if (scope == .default) "" else @tagName(scope);
+    const level_txt = comptime switch (level) {
+        .err => "ERROR",
+        .warn => "WARN ",
+        .info => "INFO ",
+        .debug => "DEBUG",
+    };
 
     const color = comptime switch (level) {
         .err => "\x1b[31m", // Red
         .warn => "\x1b[33m", // Yellow
-        .info => "\x1b[36m", // Cyan
+        .info => "\x1b[32m", // Green
         .debug => "\x1b[90m", // Gray
     };
     const reset = "\x1b[0m";
     const dim = "\x1b[2m";
-    const bold = "\x1b[1m";
 
     // Get timestamp
     const timestamp = std.time.timestamp();
     const epoch_seconds = std.time.epoch.EpochSeconds{ .secs = @intCast(timestamp) };
-    const epoch_day = epoch_seconds.getEpochDay();
     const day_seconds = epoch_seconds.getDaySeconds();
-    const year_day = epoch_day.calculateYearDay();
-    const month_day = year_day.calculateMonthDay();
 
-    const year = year_day.year;
-    const month = month_day.month.numeric();
-    const day = month_day.day_index + 1;
     const hours = day_seconds.getHoursIntoDay();
     const minutes = day_seconds.getMinutesIntoHour();
     const secs = day_seconds.getSecondsIntoMinute();
 
-    const stderr_file = std.fs.File.stderr();
-    var stderr_writer = stderr_file.writer(&.{});
-    const stderr = &stderr_writer.interface;
+    const stderr = std.fs.File.stderr();
+    var stderr_buffer: [1024]u8 = undefined;
+    var stderr_writer = stderr.writer(&stderr_buffer);
+    const writer = &stderr_writer.interface;
+    nosuspend {
+        writer.print(dim ++ "{d:0>2}:{d:0>2}:{d:0>2} " ++ reset, .{ hours, minutes, secs }) catch return;
+        writer.print(color ++ "{s} " ++ reset, .{level_txt}) catch return;
 
-    if (scope == .default) {
-        nosuspend stderr.print(dim ++ "[{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2}]" ++ reset ++ " " ++ color ++ bold ++ "{s:<5}" ++ reset ++ " " ++ format ++ "\n", .{ year, month, day, hours, minutes, secs, level_txt } ++ args) catch return;
-    } else {
-        nosuspend stderr.print(dim ++ "[{d:0>4" ++ "}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2}]" ++ reset ++ " " ++ color ++ bold ++ "{s:<5}" ++ reset ++ " " ++
-            dim ++ "({" ++ "s" ++ "})" ++ reset ++ " " ++ format ++ "\n", .{ year, month, day, hours, minutes, secs, level_txt, prefix } ++ args) catch return;
+        if (scope != .default) {
+            writer.print(dim ++ "[" ++ @tagName(scope) ++ "] " ++ reset, .{}) catch return;
+        }
+
+        writer.print(format ++ "\n", args) catch return;
+        writer.flush() catch return;
     }
 }

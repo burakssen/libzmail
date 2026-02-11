@@ -1,6 +1,12 @@
 const std = @import("std");
 const libzmail = @import("libzmail");
 
+const log = std.log.scoped(.smtp_basic);
+
+pub const std_options: std.Options = .{
+    .logFn = libzmail.utils.logFn,
+};
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -35,7 +41,7 @@ pub fn main() !void {
     };
 
     // 5. Send the email
-    std.debug.print("Sending email...\n", .{});
+    log.info("Sending email...", .{});
     try client.send(mail_data);
-    std.debug.print("Email sent successfully!\n", .{});
+    log.info("Email sent successfully!", .{});
 }

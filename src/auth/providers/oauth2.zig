@@ -92,7 +92,8 @@ fn performFlow(self: *OAuth2Provider) !void {
     const auth_url = try self.buildAuthorizationUrl(code_challenge, state);
     defer self.allocator.free(auth_url);
 
-    log.info("Opening authorization URL: {s}", .{auth_url});
+    log.info("Opening browser for authorization...", .{});
+    log.debug("Authorization URL: {s}", .{auth_url});
     try self.openBrowser(auth_url);
 
     const auth_code = try self.listenForCallback(state);

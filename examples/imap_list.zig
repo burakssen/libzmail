@@ -1,5 +1,10 @@
 const std = @import("std");
 const libzmail = @import("libzmail");
+const log = std.log.scoped(.imap_list);
+
+pub const std_options: std.Options = .{
+    .logFn = libzmail.utils.logFn,
+};
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -27,7 +32,7 @@ pub fn main() !void {
     defer client.deinit();
 
     // 4. List mailboxes
-    std.debug.print("Listing mailboxes...\n", .{});
+    log.info("Listing mailboxes...", .{});
     const mailboxes = try client.listMailboxes();
     defer {
         for (mailboxes) |*mb| {
@@ -37,8 +42,8 @@ pub fn main() !void {
     }
 
     // 5. Print results
-    std.debug.print("Found {d} mailboxes:\n", .{mailboxes.len});
+    log.info("Found {d} mailboxes:", .{mailboxes.len});
     for (mailboxes) |mb| {
-        std.debug.print("- {s} (Type: {s})\n", .{ mb.displayName(), mb.getType() });
+        log.info("- {s} (Type: {s})", .{ mb.displayName(), mb.getType() });
     }
 }

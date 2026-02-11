@@ -59,7 +59,7 @@ pub fn Client(comptime ProviderType: type) type {
             while (attempt < policy.retry.max_attempts) : (attempt += 1) {
                 if (attempt > 0) {
                     const backoff = redundancy.calculateBackoff(policy.retry, attempt);
-                    log.info("Retrying in {d}ms (attempt {d}/{d})...", .{ backoff, attempt + 1, policy.retry.max_attempts });
+                    log.debug("Retrying in {d}ms (attempt {d}/{d})...", .{ backoff, attempt + 1, policy.retry.max_attempts });
                     std.Thread.sleep(backoff * std.time.ns_per_ms);
                 }
 
