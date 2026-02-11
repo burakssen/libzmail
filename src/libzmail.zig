@@ -12,5 +12,6 @@ const log = std.log.scoped(.libzmail);
 
 test {
     _ = auth;
+    _ = protocol;
     _ = utils;
 }

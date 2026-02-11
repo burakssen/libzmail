@@ -4,16 +4,28 @@ pub const AuthType = enum {
 };
 
 pub const BasicPayload = struct {
-    username: []const u8,
-    password: []const u8,
+    username: [:0]const u8,
+    password: [:0]const u8,
 };
 
-const ClientOptions = struct {
-    auth_endpoint: []const u8,
-    token_endpoint: []const u8,
-    userinfo_endpoint: []const u8,
-    redirect_uri: []const u8,
-    scopes: ?[]const []const u8,
+pub const TokenStoreMode = enum {
+    auto,
+    memory,
+    encrypted_file,
+};
+
+pub const TokenStoreConfig = struct {
+    mode: TokenStoreMode = .auto,
+    file_path: ?[:0]const u8 = null,
+};
+
+pub const ClientOptions = struct {
+    auth_endpoint: [:0]const u8,
+    token_endpoint: [:0]const u8,
+    userinfo_endpoint: [:0]const u8,
+    redirect_uri: [:0]const u8,
+    scopes: ?[]const [:0]const u8,
+    callback_timeout_ms: u32 = 60000,
 
     pub const google = ClientOptions{
         .auth_endpoint = "https://accounts.google.com/o/oauth2/v2/auth",
@@ -41,8 +53,9 @@ const ClientOptions = struct {
 };
 
 pub const OAuth2Payload = struct {
-    client_id: []const u8,
+    client_id: [:0]const u8,
     client_options: ClientOptions,
+    token_store: TokenStoreConfig = .{},
 };
 
 pub const PayloadType = union(AuthType) {

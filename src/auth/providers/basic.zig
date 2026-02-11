@@ -20,12 +20,14 @@ pub fn deinit(_: *BasicProvider) void {}
 
 pub fn authenticate(self: *BasicProvider, curl: *c.CURL) !void {
     var res = c.curl_easy_setopt(curl, c.CURLOPT_USERNAME, self.payload.username.ptr);
-    if (res != c.CURLPX_OK) {
+    if (res != c.CURLE_OK) {
         log.err("Failed to set username for basic authentication: {s}", .{c.curl_easy_strerror(res)});
+        return error.CurlSetoptFailed;
     }
     res = c.curl_easy_setopt(curl, c.CURLOPT_PASSWORD, self.payload.password.ptr);
-    if (res != c.CURLPX_OK) {
+    if (res != c.CURLE_OK) {
         log.err("Failed to set password for basic authentication: {s}", .{c.curl_easy_strerror(res)});
+        return error.CurlSetoptFailed;
     }
     log.info("Basic authentication configured successfully", .{});
 }

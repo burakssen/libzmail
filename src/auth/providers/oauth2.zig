@@ -4,107 +4,137 @@ const log = std.log.scoped(.oauth2);
 const c = @cImport(@cInclude("curl/curl.h"));
 const types = @import("../types.zig");
 
+const token_store = @import("../token_store.zig");
+const MemoryTokenStore = @import("../token_store/memory.zig").MemoryTokenStore;
+const EncryptedFileTokenStore = @import("../token_store/encrypted_file.zig").EncryptedFileTokenStore;
+
 const OAuth2Provider = @This();
 
 const response_page = @embedFile("index.html");
 
 allocator: std.mem.Allocator,
 payload: types.OAuth2Payload,
-access_token: ?[]const u8 = null,
-username: ?[]const u8 = null,
+token_metadata: ?token_store.TokenMetadata = null,
+store: token_store.TokenStore,
 
 pub fn init(allocator: std.mem.Allocator, payload: types.OAuth2Payload) OAuth2Provider {
+    const store = switch (payload.token_store.mode) {
+        .memory => MemoryTokenStore.init(allocator).tokenStore(),
+        .encrypted_file => EncryptedFileTokenStore.init(allocator, payload.token_store.file_path orelse "tokens.bin").tokenStore(),
+        .auto => blk: {
+            if (payload.token_store.file_path) |path| {
+                break :blk EncryptedFileTokenStore.init(allocator, path).tokenStore();
+            }
+            break :blk MemoryTokenStore.init(allocator).tokenStore();
+        },
+    };
+
     return .{
         .allocator = allocator,
         .payload = payload,
+        .store = store,
     };
 }
 
 pub fn deinit(self: *OAuth2Provider) void {
-    if (self.access_token) |t| self.allocator.free(t);
-    if (self.username) |u| self.allocator.free(u);
+    if (self.token_metadata) |*tm| tm.deinit(self.allocator);
+    self.store.deinit();
 }
 
 pub fn authenticate(self: *OAuth2Provider, curl: *c.CURL) !void {
-    if (self.access_token) |token| {
-        return self.setAuthHeader(curl, token);
+    // 1. Load from store if not already loaded
+    if (self.token_metadata == null) {
+        self.token_metadata = try self.store.load(self.allocator);
     }
 
-    try self.performFlow(curl);
+    // 2. Check if we have a token and if it's still valid
+    if (self.token_metadata) |tm| {
+        const now = std.time.timestamp();
+        if (tm.expires_at_unix == null or tm.expires_at_unix.? > now + 60) {
+            return self.setAuthHeader(curl, tm.access_token, tm.username);
+        }
 
-    if (self.access_token) |token| {
-        try self.setAuthHeader(curl, token);
+        // 3. Expired or expiring soon, try refresh
+        if (tm.refresh_token) |rt| {
+            if (self.refreshAccessToken(rt)) |new_tm| {
+                if (self.token_metadata) |*old_tm| old_tm.deinit(self.allocator);
+                self.token_metadata = new_tm;
+                try self.store.save(self.token_metadata.?);
+                return self.setAuthHeader(curl, self.token_metadata.?.access_token, self.token_metadata.?.username);
+            } else |err| {
+                log.warn("Refresh failed: {any}. Falling back to full flow.", .{err});
+                try self.store.clear();
+            }
+        }
+    }
+
+    // 4. Perform full flow
+    try self.performFlow();
+
+    if (self.token_metadata) |tm| {
+        try self.store.save(tm);
+        try self.setAuthHeader(curl, tm.access_token, tm.username);
     } else {
         return error.AuthenticationFailed;
     }
 }
 
-fn performFlow(self: *OAuth2Provider, curl: *c.CURL) !void {
-    // 1. Setup PKCE
+fn performFlow(self: *OAuth2Provider) !void {
+    const state = try self.generateRandomString(32);
+    defer self.allocator.free(state);
+
     const code_verifier = try self.generateRandomString(64);
     defer self.allocator.free(code_verifier);
 
     const code_challenge = try self.generateCodeChallenge(code_verifier);
     defer self.allocator.free(code_challenge);
 
-    // 2. Authorization Step
-    const auth_url = try self.buildAuthorizationUrl(code_challenge);
+    const auth_url = try self.buildAuthorizationUrl(code_challenge, state);
     defer self.allocator.free(auth_url);
 
     log.info("Opening authorization URL: {s}", .{auth_url});
     try self.openBrowser(auth_url);
 
-    const auth_code = try self.listenForCallback();
+    const auth_code = try self.listenForCallback(state);
     defer self.allocator.free(auth_code);
 
-    // 3. Token Exchange Step
-    const tokens = try self.exchangeCodeForToken(curl, auth_code, code_verifier);
-    defer {
-        if (tokens.id_token) |t| self.allocator.free(t);
-        self.allocator.free(tokens.access_token);
-    }
+    var tokens = try self.exchangeCodeForToken(auth_code, code_verifier);
+    defer tokens.deinit(self.allocator);
 
-    self.access_token = try self.allocator.dupe(u8, tokens.access_token);
+    if (self.token_metadata) |*tm| tm.deinit(self.allocator);
+    self.token_metadata = try tokens.dupe(self.allocator);
 
-    // 4. User Info Step
-    if (tokens.id_token) |idt| {
-        if (try self.extractEmailFromIdToken(idt)) |email| {
-            self.username = email;
-        }
-    }
-
-    if (self.username == null) {
+    if (self.token_metadata.?.username == null) {
         log.info("Fetching user info from endpoint...", .{});
-        self.username = try self.fetchUserInfo(curl, self.access_token.?);
+        self.token_metadata.?.username = try self.fetchUserInfo(self.token_metadata.?.access_token);
     }
 
-    log.info("Authenticated as: {s}", .{self.username.?});
+    log.info("Authenticated as: {s}", .{self.token_metadata.?.username orelse "unknown"});
 }
 
-fn setAuthHeader(self: *OAuth2Provider, curl: *c.CURL, token: []const u8) !void {
-    var res = c.curl_easy_setopt(curl, c.CURLOPT_XOAUTH2_BEARER, token.ptr);
-    if (res != c.CURLE_OK) return error.CurlSetoptFailed;
+fn setAuthHeader(self: *OAuth2Provider, curl: *c.CURL, token: []const u8, username: ?[]const u8) !void {
+    _ = self;
+    if (c.curl_easy_setopt(curl, c.CURLOPT_XOAUTH2_BEARER, token.ptr) != c.CURLE_OK) return error.CurlSetoptFailed;
 
-    if (self.username) |u| {
-        res = c.curl_easy_setopt(curl, c.CURLOPT_USERNAME, u.ptr);
-        if (res != c.CURLE_OK) return error.CurlSetoptFailed;
+    if (username) |u| {
+        if (c.curl_easy_setopt(curl, c.CURLOPT_USERNAME, u.ptr) != c.CURLE_OK) return error.CurlSetoptFailed;
     }
 
-    res = c.curl_easy_setopt(curl, c.CURLOPT_LOGIN_OPTIONS, "AUTH=XOAUTH2");
-    if (res != c.CURLE_OK) return error.CurlSetoptFailed;
+    if (c.curl_easy_setopt(curl, c.CURLOPT_LOGIN_OPTIONS, "AUTH=XOAUTH2") != c.CURLE_OK) return error.CurlSetoptFailed;
 }
 
 // --- OAuth2 Helpers ---
 
-fn buildAuthorizationUrl(self: *OAuth2Provider, challenge: []const u8) ![]const u8 {
+fn buildAuthorizationUrl(self: *OAuth2Provider, challenge: []const u8, state: []const u8) ![]const u8 {
     var query: std.Io.Writer.Allocating = .init(self.allocator);
     defer query.deinit();
 
     const writer = &query.writer;
-    try writer.print("{s}?response_type=code&client_id={s}&code_challenge={s}&code_challenge_method=S256", .{
+    try writer.print("{s}?response_type=code&client_id={s}&code_challenge={s}&code_challenge_method=S256&state={s}", .{
         self.payload.client_options.auth_endpoint,
         self.payload.client_id,
         challenge,
+        state,
     });
 
     try writer.writeAll("&redirect_uri=");
@@ -123,12 +153,7 @@ fn buildAuthorizationUrl(self: *OAuth2Provider, challenge: []const u8) ![]const 
     return query.toOwnedSlice();
 }
 
-const TokenResult = struct {
-    access_token: []const u8,
-    id_token: ?[]const u8,
-};
-
-fn exchangeCodeForToken(self: *OAuth2Provider, curl: *c.CURL, code: []const u8, verifier: []const u8) !TokenResult {
+fn exchangeCodeForToken(self: *OAuth2Provider, code: []const u8, verifier: []const u8) !token_store.TokenMetadata {
     var form: std.Io.Writer.Allocating = .init(self.allocator);
     defer form.deinit();
 
@@ -141,11 +166,13 @@ fn exchangeCodeForToken(self: *OAuth2Provider, curl: *c.CURL, code: []const u8, 
     try self.percentEncodeWriter(writer, self.payload.client_id);
     try writer.print("&code_verifier={s}", .{verifier});
 
-    const body = try self.performRequest(curl, self.payload.client_options.token_endpoint, form.written(), null);
+    const body = try self.performRequest(self.payload.client_options.token_endpoint, form.written(), null);
     defer self.allocator.free(body);
 
     const Resp = struct {
         access_token: []const u8,
+        refresh_token: ?[]const u8 = null,
+        expires_in: ?i64 = null,
         id_token: ?[]const u8 = null,
         @"error": ?[]const u8 = null,
         error_description: ?[]const u8 = null,
@@ -159,37 +186,81 @@ fn exchangeCodeForToken(self: *OAuth2Provider, curl: *c.CURL, code: []const u8, 
         return error.OAuth2Error;
     }
 
+    var username: ?[:0]const u8 = null;
+    if (parsed.value.id_token) |idt| {
+        username = try self.extractEmailFromIdToken(idt);
+    }
+
     return .{
-        .access_token = try self.allocator.dupe(u8, parsed.value.access_token),
-        .id_token = if (parsed.value.id_token) |t| try self.allocator.dupe(u8, t) else null,
+        .access_token = try self.allocator.dupeZ(u8, parsed.value.access_token),
+        .refresh_token = if (parsed.value.refresh_token) |rt| try self.allocator.dupeZ(u8, rt) else null,
+        .expires_at_unix = if (parsed.value.expires_in) |ei| std.time.timestamp() + ei else null,
+        .username = username,
     };
 }
 
-fn fetchUserInfo(self: *OAuth2Provider, curl: *c.CURL, token: []const u8) ![]const u8 {
+fn refreshAccessToken(self: *OAuth2Provider, refresh_token: []const u8) !token_store.TokenMetadata {
+    var form: std.Io.Writer.Allocating = .init(self.allocator);
+    defer form.deinit();
+
+    const writer = &form.writer;
+    try writer.writeAll("grant_type=refresh_token&refresh_token=");
+    try self.percentEncodeWriter(writer, refresh_token);
+    try writer.writeAll("&client_id=");
+    try self.percentEncodeWriter(writer, self.payload.client_id);
+
+    const body = try self.performRequest(self.payload.client_options.token_endpoint, form.written(), null);
+    defer self.allocator.free(body);
+
+    const Resp = struct {
+        access_token: []const u8,
+        refresh_token: ?[]const u8 = null,
+        expires_in: ?i64 = null,
+        @"error": ?[]const u8 = null,
+        error_description: ?[]const u8 = null,
+    };
+
+    const parsed = try std.json.parseFromSlice(Resp, self.allocator, body, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+
+    if (parsed.value.@"error") |err| {
+        log.err("OAuth2 Refresh Error: {s} ({?s})", .{ err, parsed.value.error_description });
+        return error.OAuth2Error;
+    }
+
+    return .{
+        .access_token = try self.allocator.dupeZ(u8, parsed.value.access_token),
+        .refresh_token = if (parsed.value.refresh_token) |rt| try self.allocator.dupeZ(u8, rt) else try self.allocator.dupeZ(u8, refresh_token),
+        .expires_at_unix = if (parsed.value.expires_in) |ei| std.time.timestamp() + ei else null,
+        .username = if (self.token_metadata) |tm| if (tm.username) |u| try self.allocator.dupeZ(u8, u) else null else null,
+    };
+}
+
+fn fetchUserInfo(self: *OAuth2Provider, token: []const u8) ![:0]const u8 {
     const auth_header = try std.fmt.allocPrint(self.allocator, "Authorization: Bearer {s}", .{token});
     defer self.allocator.free(auth_header);
 
-    const body = try self.performRequest(curl, self.payload.client_options.userinfo_endpoint, null, auth_header);
+    const body = try self.performRequest(self.payload.client_options.userinfo_endpoint, null, auth_header);
     defer self.allocator.free(body);
 
     const User = struct { email: []const u8 };
     const parsed = try std.json.parseFromSlice(User, self.allocator, body, .{ .ignore_unknown_fields = true });
     defer parsed.deinit();
 
-    return self.allocator.dupe(u8, parsed.value.email);
+    return self.allocator.dupeZ(u8, parsed.value.email);
 }
 
 // --- Utils ---
 
-fn performRequest(self: *OAuth2Provider, curl: *c.CURL, url: []const u8, post_data: ?[]const u8, header: ?[]const u8) ![]const u8 {
-    _ = c.curl_easy_reset(curl);
+fn performRequest(self: *OAuth2Provider, url: []const u8, post_data: ?[]const u8, header: ?[]const u8) ![]const u8 {
+    const curl = c.curl_easy_init() orelse return error.CurlInitFailed;
+    defer c.curl_easy_cleanup(curl);
 
-    var res = c.curl_easy_setopt(curl, c.CURLOPT_URL, url.ptr);
-    if (res != c.CURLE_OK) return error.CurlSetoptFailed;
+    if (c.curl_easy_setopt(curl, c.CURLOPT_URL, url.ptr) != c.CURLE_OK) return error.CurlSetoptFailed;
 
     if (post_data) |data| {
-        res = c.curl_easy_setopt(curl, c.CURLOPT_POSTFIELDS, data.ptr);
-        res = c.curl_easy_setopt(curl, c.CURLOPT_POSTFIELDSIZE, @as(c_long, @intCast(data.len)));
+        if (c.curl_easy_setopt(curl, c.CURLOPT_POSTFIELDS, data.ptr) != c.CURLE_OK) return error.CurlSetoptFailed;
+        if (c.curl_easy_setopt(curl, c.CURLOPT_POSTFIELDSIZE, @as(c_long, @intCast(data.len))) != c.CURLE_OK) return error.CurlSetoptFailed;
     }
 
     var headers: ?*c.struct_curl_slist = null;
@@ -197,7 +268,7 @@ fn performRequest(self: *OAuth2Provider, curl: *c.CURL, url: []const u8, post_da
 
     if (header) |h| {
         headers = c.curl_slist_append(headers, h.ptr);
-        res = c.curl_easy_setopt(curl, c.CURLOPT_HTTPHEADER, headers);
+        if (c.curl_easy_setopt(curl, c.CURLOPT_HTTPHEADER, headers) != c.CURLE_OK) return error.CurlSetoptFailed;
     }
 
     var resp_buf: std.Io.Writer.Allocating = .init(self.allocator);
@@ -205,13 +276,20 @@ fn performRequest(self: *OAuth2Provider, curl: *c.CURL, url: []const u8, post_da
 
     const response_writer = &resp_buf.writer;
 
-    res = c.curl_easy_setopt(curl, c.CURLOPT_WRITEFUNCTION, writeCallback);
-    res = c.curl_easy_setopt(curl, c.CURLOPT_WRITEDATA, response_writer);
+    if (c.curl_easy_setopt(curl, c.CURLOPT_WRITEFUNCTION, writeCallback) != c.CURLE_OK) return error.CurlSetoptFailed;
+    if (c.curl_easy_setopt(curl, c.CURLOPT_WRITEDATA, response_writer) != c.CURLE_OK) return error.CurlSetoptFailed;
 
-    res = c.curl_easy_perform(curl);
-    if (res != c.CURLE_OK) {
-        log.err("Request failed: {s}", .{c.curl_easy_strerror(res)});
+    const perform_res = c.curl_easy_perform(curl);
+    if (perform_res != c.CURLE_OK) {
+        log.err("Request failed: {s}", .{c.curl_easy_strerror(perform_res)});
         return error.CurlPerformFailed;
+    }
+
+    var http_code: c_long = 0;
+    if (c.curl_easy_getinfo(curl, c.CURLINFO_RESPONSE_CODE, &http_code) != c.CURLE_OK) return error.CurlGetinfoFailed;
+
+    if (http_code >= 400) {
+        log.err("HTTP request failed with code: {d}", .{http_code});
     }
 
     return resp_buf.toOwnedSlice();
@@ -225,13 +303,29 @@ fn writeCallback(ptr: *anyopaque, size: c_uint, nmemb: c_uint, userdata: *anyopa
     return real_size;
 }
 
-fn listenForCallback(self: *OAuth2Provider) ![]const u8 {
+fn listenForCallback(self: *OAuth2Provider, expected_state: []const u8) ![]const u8 {
     const uri = try std.Uri.parse(self.payload.client_options.redirect_uri);
     const port = uri.port orelse return error.MissingPortInRedirectURI;
 
     const addr = try std.net.Address.parseIp("127.0.0.1", port);
     var server = try addr.listen(.{ .reuse_address = true });
     defer server.deinit();
+
+    // Set a timeout for accept
+    const socket = server.stream.handle;
+    var poll_fds = [_]std.posix.pollfd{.{
+        .fd = socket,
+        .events = std.posix.POLL.IN,
+        .revents = 0,
+    }};
+
+    // On Windows, poll constants are at top level of std.posix
+    if (@import("builtin").os.tag == .windows) {
+        poll_fds[0].events = @as(i16, @intCast(std.posix.POLLIN));
+    }
+
+    const ready_count = try std.posix.poll(&poll_fds, @intCast(self.payload.client_options.callback_timeout_ms));
+    if (ready_count == 0) return error.CallbackTimeout;
 
     const conn = try server.accept();
     defer conn.stream.close();
@@ -240,16 +334,26 @@ fn listenForCallback(self: *OAuth2Provider) ![]const u8 {
     const len = try conn.stream.read(&buf);
     const req = buf[0..len];
 
-    // Simple parser for "code=..."
-    // We look for "code=" followed by chars until space or &
+    // Check state first
+    const state_marker = "state=";
+    if (std.mem.indexOf(u8, req, state_marker)) |idx| {
+        const start = idx + state_marker.len;
+        var end = start;
+        while (end < req.len and req[end] != ' ' and req[end] != '&' and req[end] != '\r') : (end += 1) {}
+        const state = req[start..end];
+        if (!std.mem.eql(u8, state, expected_state)) {
+            log.err("State mismatch: expected {s}, got {s}", .{ expected_state, state });
+            return error.StateMismatch;
+        }
+    } else {
+        return error.StateMissing;
+    }
+
     const marker = "code=";
     if (std.mem.indexOf(u8, req, marker)) |idx| {
         const start = idx + marker.len;
         var end = start;
-        while (end < req.len) : (end += 1) {
-            const char = req[end];
-            if (char == ' ' or char == '&' or char == '\r' or char == '\n') break;
-        }
+        while (end < req.len and req[end] != ' ' and req[end] != '&' and req[end] != '\r') : (end += 1) {}
 
         const raw_code = req[start..end];
 
@@ -283,7 +387,6 @@ fn generateRandomString(self: *OAuth2Provider, len: usize) ![]const u8 {
     const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~";
     const out = try self.allocator.alloc(u8, len);
 
-    // Use crypto secure random
     var seed: [8]u8 = undefined;
     try std.posix.getrandom(&seed);
     var prng = std.Random.DefaultPrng.init(std.mem.readInt(u64, &seed, .little));
@@ -295,12 +398,11 @@ fn generateRandomString(self: *OAuth2Provider, len: usize) ![]const u8 {
     return out;
 }
 
-fn extractEmailFromIdToken(self: *OAuth2Provider, id_token: []const u8) !?[]const u8 {
+fn extractEmailFromIdToken(self: *OAuth2Provider, id_token: []const u8) !?[:0]const u8 {
     var it = std.mem.splitScalar(u8, id_token, '.');
     _ = it.next(); // header
     const payload_b64 = it.next() orelse return null;
 
-    // Use a decoder that ignores padding if needed
     const decoder = std.base64.url_safe_no_pad.Decoder;
     const decoded_len = try decoder.calcSizeForSlice(payload_b64);
 
@@ -312,8 +414,8 @@ fn extractEmailFromIdToken(self: *OAuth2Provider, id_token: []const u8) !?[]cons
     const parsed = try std.json.parseFromSlice(Payload, self.allocator, payload_json, .{ .ignore_unknown_fields = true });
     defer parsed.deinit();
 
-    if (parsed.value.email) |e| return try self.allocator.dupe(u8, e);
-    if (parsed.value.preferred_username) |u| return try self.allocator.dupe(u8, u);
+    if (parsed.value.email) |e| return try self.allocator.dupeZ(u8, e);
+    if (parsed.value.preferred_username) |u| return try self.allocator.dupeZ(u8, u);
     return null;
 }
 

@@ -1,10 +1,14 @@
 const std = @import("std");
 const utils = @import("utils");
 
+const redundancy = @import("../redundancy.zig");
+
 pub const ImapPayload = struct {
-    hostname: []const u8,
+    hostname: [:0]const u8,
     port: u16 = 993,
     use_tls: bool = true,
+    fallback_endpoints: []const redundancy.Endpoint = &.{},
+    redundancy_policy: redundancy.RedundancyPolicy = .{},
 };
 
 /// Represents mailbox flags as defined in RFC 3501
