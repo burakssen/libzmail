@@ -17,7 +17,8 @@ pub fn main() !void {
         .token_store = .{ .mode = .auto },
         .client_options = .google,
     };
-    var provider = libzmail.auth.Provider(.oauth2).init(allocator, basic_payload);
+    const ProviderType = libzmail.auth.Provider(.oauth2);
+    var provider = ProviderType.init(allocator, basic_payload);
     defer provider.deinit();
 
     // 2. Configure IMAP payload
@@ -28,7 +29,7 @@ pub fn main() !void {
     };
 
     // 3. Initialize IMAP client
-    var client = try libzmail.protocol.imap.Client(@TypeOf(provider)).init(allocator, imap_payload, &provider);
+    var client = try libzmail.protocol.imap.Client(ProviderType).init(allocator, imap_payload, &provider);
     defer client.deinit();
 
     // 4. List mailboxes

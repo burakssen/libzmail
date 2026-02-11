@@ -33,7 +33,7 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    protocol_mod.linkSystemLibrary("curl", .{});
+    protocol_mod.linkSystemLibrary("curl", .{ .preferred_link_mode = .static });
 
     if (target.result.os.tag == .macos) {
         auth_mod.linkFramework("Security", .{});
